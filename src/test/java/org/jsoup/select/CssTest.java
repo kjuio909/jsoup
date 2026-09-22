@@ -218,4 +218,144 @@ public class CssTest {
 		assertEquals(Tag.valueOf("body"), sel2.get(0).tag());
 	}
 
+	// https://www.w3.org/TR/selectors-4/#nth-child-pseudo :nth-child(An+B of S)
+	private static final String OfFixture =
+		"<i id=\"a\" class=\"x\"></i><i id=\"b\"></i><i id=\"c\" class=\"x\"></i>"
+		+ "<i id=\"d\" class=\"x\"></i><i id=\"e\"></i><i id=\"f\" class=\"x\"></i>";
+
+	private static Document ofDoc() {
+		return Jsoup.parse(OfFixture);
+	}
+
+	private static void checkIds(Elements result, String... expectedIds) {
+		assertEquals(expectedIds.length, result.size(), "Number of elements");
+		for (int i = 0; i < expectedIds.length; i++)
+			assertEquals(expectedIds[i], result.get(i).id(), "Expected element");
+	}
+
+	@Test
+	public void nthChildOf_forward() {
+		Document doc = ofDoc();
+		// among the .x siblings (a=1, c=2, d=3, f=4), the even positions are c and f
+		checkIds(doc.select("i:nth-child(2n of .x)"), "c", "f");
+		checkIds(doc.select("i:nth-child(even of .x)"), "c", "f");
+		checkIds(doc.select("i:nth-child(odd of .x)"), "a", "d");
+		checkIds(doc.select("i:nth-child(1 of .x)"), "a");
+		checkIds(doc.select("i:nth-child(-n+2 of .x)"), "a", "c");
+	}
+
+	@Test
+	public void nthLastChildOf_reverse() {
+		Document doc = ofDoc();
+		// counted from the end of the .x siblings (f=1, d=2, c=3, a=4), the even positions are a and d
+		checkIds(doc.select("i:nth-last-child(2n of .x)"), "a", "d");
+		checkIds(doc.select("i:nth-last-child(even of .x)"), "a", "d");
+		// odd positions are f and c; results are still collected in document order
+		checkIds(doc.select("i:nth-last-child(odd of .x)"), "c", "f");
+		checkIds(doc.select("i:nth-last-child(1 of .x)"), "f");
+		checkIds(doc.select("i:nth-last-child(-n+2 of .x)"), "d", "f");
+	}
+
+	@Test
+	public void nthChildOf_isConsistent() {
+		Document doc = ofDoc();
+		for (org.jsoup.nodes.Element el : doc.select("i")) {
+			boolean expectedForward = el.id().equals("c") || el.id().equals("f");
+			assertEquals(expectedForward, el.is("i:nth-child(2n of .x)"), el.id());
+
+			boolean expectedReverse = el.id().equals("a") || el.id().equals("d");
+			assertEquals(expectedReverse, el.is("i:nth-last-child(2n of .x)"), el.id());
+		}
+	}
+
+	@Test
+	public void nthChildOf_nonMatchingSiblingsHoldNoPosition() {
+		// b and e do not match .x, and must not occupy a position; they themselves never match
+		Document doc = ofDoc();
+		for (String id : new String[]{"b", "e"}) {
+			org.jsoup.nodes.Element el = doc.getElementById(id);
+			assertFalse(el.is("i:nth-child(1n of .x)"));
+			assertFalse(el.is("i:nth-last-child(1n of .x)"));
+		}
+		// without a filter, all 6 siblings keep their natural positions
+		checkIds(doc.select("i:nth-child(2n)"), "b", "d", "f");
+	}
+
+	@Test
+	public void nthChildOf_selectorList() {
+		Document doc = ofDoc();
+		// comma-separated list: .x or #e => a, c, d, e, f; even positions are c and e
+		checkIds(doc.select("i:nth-child(2n of .x, #e)"), "c", "e");
+		// from the end, the even filtered positions are also c and e; results are still in document order
+		checkIds(doc.select("i:nth-last-child(2n of .x, #e)"), "c", "e");
+	}
+
+	@Test
+	public void nthChildOf_nestedPseudos() {
+		Document doc = ofDoc();
+		// :is() inside the selector list
+		checkIds(doc.select("i:nth-child(2n of :is(.x))"), "c", "f");
+		// :not() inside the selector list => a, c, f; even filtered position is c
+		checkIds(doc.select("i:nth-child(2n of .x:not(#d))"), "c");
+		// nested nth-child inside the of list: .x that is an odd natural child => a, d; first filtered position is a
+		checkIds(doc.select("i:nth-child(1 of .x:nth-child(odd))"), "a");
+	}
+
+	@Test
+	public void nthChildOf_ofNotSplitInsideParensQuotesOrEscapes() {
+		// the "of" inside quotes must not be treated as the clause delimiter; only a and f carry the attribute
+		Document quoted = Jsoup.parse(
+			"<i id=\"a\" class=\"x\" data-v=\"x of y\"></i><i id=\"b\"></i>"
+			+ "<i id=\"c\" class=\"x\"></i><i id=\"f\" class=\"x\" data-v=\"x of y\"></i>");
+		checkIds(quoted.select("i:nth-child(2n of .x[data-v=\"x of y\"])"), "f");
+
+		// the "of" inside nested parens (:is) must not split the clause
+		Document doc = ofDoc();
+		checkIds(doc.select("i:nth-child(2n of .x:is(.x, .y))"), "c", "f");
+
+		// a nested :nth-child(... of ...) inside the of list puts "of" inside parens - must not be
+		// mistaken for a second top-level clause (nothing carries class y, so the result is empty)
+		checkIds(doc.select("i:nth-child(1n of .x:nth-child(1n of .y))"));
+
+		// an escaped class identifier that decodes to "of" must not be mistaken for the keyword
+		Document escaped = Jsoup.parse(OfFixture + "<i id=\"g\" class=\"of\"></i>");
+		checkIds(escaped.select("i:nth-child(1n of .\\6f f)"), "g");
+	}
+
+	@Test
+	public void nthChildOf_perParent() {
+		// positions are computed among siblings of the same parent, independently
+		Document doc = Jsoup.parse(
+			"<div><i id=\"a\" class=\"x\"></i><i id=\"b\"></i></div>"
+			+ "<div><i id=\"c\" class=\"x\"></i><i id=\"d\" class=\"x\"></i></div>");
+		checkIds(doc.select("i:nth-child(1 of .x)"), "a", "c");
+	}
+
+	@Test
+	public void nthChildOf_compiledEvaluatorToString() {
+		Evaluator eval = QueryParser.parse("i:nth-child(2n of .x)");
+		assertTrue(eval.toString().contains(":nth-child(2n of .x)"));
+	}
+
+	@Test
+	public void nthChildOf_errors() {
+		Document doc = ofDoc();
+		// empty selector list
+		assertThrows(Selector.SelectorParseException.class, () -> doc.select("i:nth-child(2n of )"));
+		// missing formula
+		assertThrows(Selector.SelectorParseException.class, () -> doc.select("i:nth-child(of .x)"));
+		// invalid formula
+		assertThrows(Selector.SelectorParseException.class, () -> doc.select("i:nth-child(banana of .x)"));
+		// invalid selector list
+		assertThrows(Selector.SelectorParseException.class, () -> doc.select("i:nth-child(2n of ..x)"));
+		assertThrows(Selector.SelectorParseException.class, () -> doc.select("i:nth-child(2n of .x >)"));
+		// more than one top-level of clause
+		assertThrows(Selector.SelectorParseException.class, () -> doc.select("i:nth-child(2n of .x of .y)"));
+		// trailing tokens after the pseudo are not ignored
+		assertThrows(Selector.SelectorParseException.class, () -> doc.select("i:nth-child(2n of .x) ?"));
+		// nth-of-type / nth-last-of-type do not accept an of clause
+		assertThrows(Selector.SelectorParseException.class, () -> doc.select("i:nth-of-type(2n of .x)"));
+		assertThrows(Selector.SelectorParseException.class, () -> doc.select("i:nth-last-of-type(2n of .x)"));
+	}
+
 }

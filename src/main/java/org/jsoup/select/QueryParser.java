@@ -386,34 +386,108 @@ public class QueryParser implements AutoCloseable {
     private static final Pattern NthOffset = Pattern.compile("([+-])?(\\d+)");
 
     private Evaluator cssNthChild(boolean last, boolean ofType) {
-        String arg = normalize(consumeParens()); // arg is like "odd", or "-n+2", within nth-child(odd)
-        final int step, offset;
-        if ("odd".equals(arg)) {
-            step = 2;
-            offset = 1;
-        } else if ("even".equals(arg)) {
-            step = 2;
-            offset = 0;
+        // arg is like "odd", "-n+2", or "2n of .foo" within :nth-child(...)
+        String arg = consumeParens();
+        int ofIndex = indexOfTopLevelOf(arg);
+
+        int[] stepOffset;
+        Evaluator filter = null;
+        if (ofIndex == -1) {
+            stepOffset = parseNthFormula(normalize(arg));
         } else {
-            Matcher stepOffsetM, stepM;
-            if ((stepOffsetM = NthStepOffset.matcher(arg)).matches()) {
-                if (stepOffsetM.group(3) != null) // has digits, like 3n+2 or -3n+2
-                    step = Integer.parseInt(stepOffsetM.group(1).replaceFirst("^\\+", ""));
-                else // no digits, might be like n+2, or -n+2. if group(2) == "-", it’s -1;
-                    step = "-".equals(stepOffsetM.group(2)) ? -1 : 1;
-                offset =
-                    stepOffsetM.group(4) != null ? Integer.parseInt(stepOffsetM.group(4).replaceFirst("^\\+", "")) : 0;
-            } else if ((stepM = NthOffset.matcher(arg)).matches()) {
-                step = 0;
-                offset = Integer.parseInt(stepM.group().replaceFirst("^\\+", ""));
-            } else {
-                throw new Selector.SelectorParseException("Could not parse nth-index '%s': unexpected format", arg);
-            }
+            if (ofType)
+                throw new Selector.SelectorParseException(
+                    ":%s does not support an 'of <selector-list>' clause", last ? "nth-last-of-type" : "nth-of-type");
+
+            String formula = normalize(arg.substring(0, ofIndex));
+            String selectorList = arg.substring(ofIndex + 2).trim();
+            stepOffset = parseNthFormula(formula); // throws on an empty or invalid An+B formula
+            Validate.notEmpty(selectorList,
+                last ? ":nth-last-child(An+B of <selector-list>) must have a selector list"
+                     : ":nth-child(An+B of <selector-list>) must have a selector list");
+            filter = parse(selectorList); // parse the list fully; a trailing remainder is an error
         }
 
+        int step = stepOffset[0];
+        int offset = stepOffset[1];
+        if (filter != null)
+            return last ? new Evaluator.IsNthLastChildOf(step, offset, filter) : new Evaluator.IsNthChildOf(step, offset, filter);
         return ofType
             ? (last ? new Evaluator.IsNthLastOfType(step, offset) : new Evaluator.IsNthOfType(step, offset))
             : (last ? new Evaluator.IsNthLastChild(step, offset) : new Evaluator.IsNthChild(step, offset));
+    }
+
+    /** Parses an An+B, odd, or even formula into {@code [step, offset]}. */
+    private static int[] parseNthFormula(String arg) {
+        if ("odd".equals(arg))
+            return new int[]{2, 1};
+        if ("even".equals(arg))
+            return new int[]{2, 0};
+
+        Matcher stepOffsetM, stepM;
+        if ((stepOffsetM = NthStepOffset.matcher(arg)).matches()) {
+            final int step;
+            if (stepOffsetM.group(3) != null) // has digits, like 3n+2 or -3n+2
+                step = Integer.parseInt(stepOffsetM.group(1).replaceFirst("^\\+", ""));
+            else // no digits, might be like n+2, or -n+2. if group(2) == "-", it’s -1;
+                step = "-".equals(stepOffsetM.group(2)) ? -1 : 1;
+            int offset =
+                stepOffsetM.group(4) != null ? Integer.parseInt(stepOffsetM.group(4).replaceFirst("^\\+", "")) : 0;
+            return new int[]{step, offset};
+        } else if ((stepM = NthOffset.matcher(arg)).matches()) {
+            return new int[]{0, Integer.parseInt(stepM.group().replaceFirst("^\\+", ""))};
+        } else {
+            throw new Selector.SelectorParseException("Could not parse nth-index '%s': unexpected format", arg);
+        }
+    }
+
+    /**
+     Finds the index of the single top-level, whitespace-delimited {@code of} keyword in an :nth-child argument. The
+     keyword is ignored inside brackets (parens or square brackets), quotes, or escapes.
+     @return the index of the keyword's {@code o}, or -1 if there is none
+     @throws Selector.SelectorParseException if more than one top-level {@code of} keyword is found
+     */
+    private static int indexOfTopLevelOf(String arg) {
+        int depth = 0;
+        boolean inSingle = false;
+        boolean inDouble = false;
+        int found = -1;
+
+        for (int i = 0, len = arg.length(); i < len; i++) {
+            char c = arg.charAt(i);
+            if (inSingle) {
+                if (c == '\\') i++;
+                else if (c == '\'') inSingle = false;
+            } else if (inDouble) {
+                if (c == '\\') i++;
+                else if (c == '"') inDouble = false;
+            } else if (c == '\\') {
+                i++;
+            } else if (c == '\'') {
+                inSingle = true;
+            } else if (c == '"') {
+                inDouble = true;
+            } else if (c == '(' || c == '[') {
+                depth++;
+            } else if (c == ')' || c == ']') {
+                depth--;
+            } else if (depth == 0 && isOfKeywordAt(arg, i)
+                && i > 0 && StringUtil.isWhitespace(arg.charAt(i - 1))
+                && (i + 2 == len || StringUtil.isWhitespace(arg.charAt(i + 2)))) {
+                if (found != -1)
+                    throw new Selector.SelectorParseException(
+                        "Could not parse nth-child argument '%s': only one 'of <selector-list>' clause is allowed", arg);
+                found = i;
+                i++; // skip the 'f'; the loop's increment moves past it
+            }
+        }
+        return found;
+    }
+
+    private static boolean isOfKeywordAt(String arg, int i) {
+        return i + 2 <= arg.length()
+            && (arg.charAt(i) == 'o' || arg.charAt(i) == 'O')
+            && (arg.charAt(i + 1) == 'f' || arg.charAt(i + 1) == 'F');
     }
 
     private String consumeParens() {

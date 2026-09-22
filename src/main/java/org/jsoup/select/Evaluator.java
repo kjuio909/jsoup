@@ -625,6 +625,116 @@ public abstract class Evaluator {
     }
 
     /**
+     * css-compatible Evaluator for {@code :nth-child(An+B of selector-list)}: the An+B position is computed only over
+     * the element children of the same parent that match the {@code of} selector-list. Other siblings do not occupy a
+     * position. The element under test must itself match the list.
+     *
+     * @see <a href="https://www.w3.org/TR/selectors-4/#nth-child-pseudo">Selectors Level 4, :nth-child()</a>
+     */
+    public static final class IsNthChildOf extends CssNthEvaluator {
+        final Evaluator filter;
+
+        public IsNthChildOf(int step, int offset, Evaluator filter) {
+            super(step, offset);
+            this.filter = filter;
+        }
+
+        @Override
+        public boolean matches(Element root, Element element) {
+            return filter.matches(root, element) && super.matches(root, element);
+        }
+
+        @Override
+        protected int calculatePosition(Element root, Element element) {
+            final Element parent = element.parent();
+            if (parent == null) return 0;
+
+            int pos = 0;
+            for (Element sib = parent.firstElementChild(); sib != null; sib = sib.nextElementSibling()) {
+                if (filter.matches(root, sib)) pos++;
+                if (sib == element) break;
+            }
+            return pos;
+        }
+
+        @Override protected int cost() {
+            return 5 + filter.cost();
+        }
+
+        @Override protected void reset() {
+            filter.reset();
+            super.reset();
+        }
+
+        @Override
+        protected String getPseudoClass() {
+            return "nth-child";
+        }
+
+        @Override
+        public String toString() {
+            return String.format(":nth-child(%s of %s)", nthArgs(a, b), filter);
+        }
+    }
+
+    /**
+     * css-compatible Evaluator for {@code :nth-last-child(An+B of selector-list)}: like {@link IsNthChildOf}, but the
+     * position is counted from the end of the filtered siblings.
+     */
+    public static final class IsNthLastChildOf extends CssNthEvaluator {
+        final Evaluator filter;
+
+        public IsNthLastChildOf(int step, int offset, Evaluator filter) {
+            super(step, offset);
+            this.filter = filter;
+        }
+
+        @Override
+        public boolean matches(Element root, Element element) {
+            return filter.matches(root, element) && super.matches(root, element);
+        }
+
+        @Override
+        protected int calculatePosition(Element root, Element element) {
+            final Element parent = element.parent();
+            if (parent == null) return 0;
+
+            int pos = 0;
+            for (Element sib = parent.lastElementChild(); sib != null; sib = sib.previousElementSibling()) {
+                if (filter.matches(root, sib)) pos++;
+                if (sib == element) break;
+            }
+            return pos;
+        }
+
+        @Override protected int cost() {
+            return 5 + filter.cost();
+        }
+
+        @Override protected void reset() {
+            filter.reset();
+            super.reset();
+        }
+
+        @Override
+        protected String getPseudoClass() {
+            return "nth-last-child";
+        }
+
+        @Override
+        public String toString() {
+            return String.format(":nth-last-child(%s of %s)", nthArgs(a, b), filter);
+        }
+    }
+
+    /** Formats An+B arguments as css accepts them (e.g. "odd" is handled by the parser, not here). */
+    private static String nthArgs(int a, int b) {
+        if (a == 0) return Integer.toString(b);
+        if (b == 0) return a + "n";
+        return a + "n" + (b > 0 ? "+" + b : Integer.toString(b));
+    }
+
+    /**
      * css pseudo class :nth-last-child)
      *
      * @see IndexEquals
