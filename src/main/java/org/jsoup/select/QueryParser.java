@@ -386,34 +386,128 @@ public class QueryParser implements AutoCloseable {
     private static final Pattern NthOffset = Pattern.compile("([+-])?(\\d+)");
 
     private Evaluator cssNthChild(boolean last, boolean ofType) {
-        String arg = normalize(consumeParens()); // arg is like "odd", or "-n+2", within nth-child(odd)
+        String arg = consumeParens(); // arg is like "odd", "-n+2", or "2n of .x" within nth-child(...)
+
+        // Split out a top-level " of <selector-list>" clause, if present. Only :nth-child and :nth-last-child
+        // accept of; :nth-of-type / :nth-last-of-type do not.
+        String formulaArg = arg;
+        String ofSelector = null;
+        final int ofIdx = indexOfTopLevelOf(arg);
+        if (ofIdx >= 0) {
+            if (ofType)
+                throw new Selector.SelectorParseException(
+                    "Could not parse query '%s': :nth-%s-of-type does not support an 'of <selector-list>' clause",
+                    query, last ? "last" : "");
+
+            formulaArg = arg.substring(0, ofIdx);
+            ofSelector = arg.substring(ofIdx + 2).trim();
+            if (ofSelector.isEmpty())
+                throw new Selector.SelectorParseException(
+                    "Could not parse query '%s': :nth-child 'of <selector-list>' must have a selector", query);
+        }
+
+        formulaArg = normalize(formulaArg);
         final int step, offset;
-        if ("odd".equals(arg)) {
+        if ("odd".equals(formulaArg)) {
             step = 2;
             offset = 1;
-        } else if ("even".equals(arg)) {
+        } else if ("even".equals(formulaArg)) {
             step = 2;
             offset = 0;
         } else {
             Matcher stepOffsetM, stepM;
-            if ((stepOffsetM = NthStepOffset.matcher(arg)).matches()) {
+            if ((stepOffsetM = NthStepOffset.matcher(formulaArg)).matches()) {
                 if (stepOffsetM.group(3) != null) // has digits, like 3n+2 or -3n+2
                     step = Integer.parseInt(stepOffsetM.group(1).replaceFirst("^\\+", ""));
                 else // no digits, might be like n+2, or -n+2. if group(2) == "-", it’s -1;
                     step = "-".equals(stepOffsetM.group(2)) ? -1 : 1;
                 offset =
                     stepOffsetM.group(4) != null ? Integer.parseInt(stepOffsetM.group(4).replaceFirst("^\\+", "")) : 0;
-            } else if ((stepM = NthOffset.matcher(arg)).matches()) {
+            } else if ((stepM = NthOffset.matcher(formulaArg)).matches()) {
                 step = 0;
                 offset = Integer.parseInt(stepM.group().replaceFirst("^\\+", ""));
             } else {
-                throw new Selector.SelectorParseException("Could not parse nth-index '%s': unexpected format", arg);
+                throw new Selector.SelectorParseException("Could not parse nth-index '%s': unexpected format", formulaArg);
             }
+        }
+
+        if (ofSelector != null) {
+            // parse via the static entry point so an invalid list, empty list, or trailing tokens all throw cleanly
+            Evaluator ofEval = QueryParser.parse(ofSelector);
+            return last
+                ? new Evaluator.IsNthLastChildOf(step, offset, ofEval)
+                : new Evaluator.IsNthChildOf(step, offset, ofEval);
         }
 
         return ofType
             ? (last ? new Evaluator.IsNthLastOfType(step, offset) : new Evaluator.IsNthOfType(step, offset))
             : (last ? new Evaluator.IsNthLastChild(step, offset) : new Evaluator.IsNthChild(step, offset));
+    }
+
+    /**
+     Finds the index of a top-level, whitespace-delimited {@code of} separator in an {@code :nth-child()} argument.
+     An {@code of} nested inside parentheses, brackets, quotes, or an escape sequence is not top level. Throws if more
+     than one such separator is present.
+     @return index of the {@code of}, or -1 if there is none
+     */
+    private static int indexOfTopLevelOf(String arg) {
+        int found = -1;
+        int depth = 0; // (), [], {}
+        char quote = 0; // active quote char: ', ", or 0
+        boolean escaped = false; // previous char was an unescaped backslash
+        int escapedCharPos = -2; // index of the char consumed as a backslash escape target
+
+        for (int i = 0; i < arg.length(); i++) {
+            char c = arg.charAt(i);
+
+            if (escaped) {
+                escaped = false;
+                escapedCharPos = i;
+                continue;
+            }
+            if (c == '\\') {
+                escaped = true;
+                continue;
+            }
+            if (quote != 0) {
+                if (c == quote) quote = 0;
+                continue;
+            }
+            if (c == '\'' || c == '"') {
+                quote = c;
+                continue;
+            }
+            if (c == '(' || c == '[' || c == '{') {
+                depth++;
+                continue;
+            }
+            if (c == ')' || c == ']' || c == '}') {
+                depth--;
+                continue;
+            }
+            if (depth == 0 && (c == 'o' || c == 'O')) { // cheap pre-check, with full check below
+                if (matchesTopLevelOfAt(arg, i, escapedCharPos)) {
+                    if (found != -1)
+                        throw new Selector.SelectorParseException(
+                            "Could not parse nth-index '%s': multiple 'of' clauses are not allowed", arg);
+                    found = i;
+                    i++; // skip the 'f'
+                }
+            }
+        }
+        return found;
+    }
+
+    /** True if {@code arg} at {@code i} is an {@code of} keyword bounded by unescaped whitespace on both sides. */
+    private static boolean matchesTopLevelOfAt(String arg, int i, int escapedCharPos) {
+        if (i + 1 >= arg.length() || (arg.charAt(i + 1) != 'f' && arg.charAt(i + 1) != 'F'))
+            return false;
+        if (i - 1 == escapedCharPos) // preceding whitespace (or other char) was a CSS escape target
+            return false;
+        if (i == 0 || !StringUtil.isWhitespace(arg.charAt(i - 1)))
+            return false;
+        int after = i + 2;
+        return after < arg.length() && StringUtil.isWhitespace(arg.charAt(after));
     }
 
     private String consumeParens() {

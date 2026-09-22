@@ -1413,6 +1413,130 @@ public class SelectorTest {
         assertSelectedOwnText(neg2, "1", "2");
     }
 
+    // fixture: six i element children, class .x on a, c, d, f (ids are the letters)
+    private static Document nthOfDoc() {
+        return Jsoup.parse(
+            "<p>" +
+                "<i id=a class=x></i>" +
+                "<i id=b></i>" +
+                "<i id=c class=x></i>" +
+                "<i id=d class=x></i>" +
+                "<i id=e></i>" +
+                "<i id=f class=x></i>" +
+            "</p>");
+    }
+
+    // .x filtered order is a1 c2 d3 f4
+    @Test void nthChildOfSelectorForward() {
+        Document doc = nthOfDoc();
+        assertSelectedIds(doc.select("i:nth-child(2n of .x)"), "c", "f");
+        assertSelectedIds(doc.select("i:nth-child(even of .x)"), "c", "f");
+        assertSelectedIds(doc.select("i:nth-child(odd of .x)"), "a", "d");
+        assertSelectedIds(doc.select("i:nth-child(3 of .x)"), "d");
+        assertSelectedIds(doc.select("i:nth-child(-n+2 of .x)"), "a", "c");
+        assertSelectedIds(doc.select("i:nth-child(n+3 of .x)"), "d", "f");
+    }
+
+    @Test void nthLastChildOfSelectorReverse() {
+        Document doc = nthOfDoc();
+        // from the end: f1 d2 c3 a4
+        assertSelectedIds(doc.select("i:nth-last-child(2n of .x)"), "a", "d");
+        assertSelectedIds(doc.select("i:nth-last-child(even of .x)"), "a", "d");
+        assertSelectedIds(doc.select("i:nth-last-child(odd of .x)"), "c", "f");
+        assertSelectedIds(doc.select("i:nth-last-child(1 of .x)"), "f");
+        assertSelectedIds(doc.select("i:nth-last-child(-n+2 of .x)"), "d", "f");
+    }
+
+    @Test void nthChildOfSelectorIsParity() {
+        Document doc = nthOfDoc();
+        for (Element i : doc.expectFirst("p").children()) {
+            boolean expectForward = i.id().equals("c") || i.id().equals("f");
+            assertEquals(expectForward, i.is("i:nth-child(2n of .x)"), "forward is() for " + i.id());
+            assertEquals(expectForward, i.is(":nth-child(2n of .x)"), "forward is() bare for " + i.id());
+
+            boolean expectReverse = i.id().equals("a") || i.id().equals("d");
+            assertEquals(expectReverse, i.is("i:nth-last-child(2n of .x)"), "reverse is() for " + i.id());
+        }
+    }
+
+    @Test void nthChildOfNonMatchingSiblingsDoNotCount() {
+        // b and e don't match .x, so c is the 2nd .x even though it is the 3rd element child; non-matching siblings
+        // also do not occupy a slot for elements that do match
+        Document doc = nthOfDoc();
+        Element b = doc.expectFirst("#b");
+        Element e = doc.expectFirst("#e");
+        assertFalse(b.is(":nth-child(1 of .x)")); // self must match the of-list
+        assertFalse(e.is(":nth-child(2 of .x)"));
+        assertSelectedIds(doc.select("p > :nth-child(2 of .x)"), "c");
+    }
+
+    @Test void nthChildOfCompoundSelectorList() {
+        Document doc = nthOfDoc();
+        // filtered by ".x, #b": a1 b2 c3 d4 f5; evens -> b, d
+        assertSelectedIds(doc.select("i:nth-child(2n of .x, #b)"), "b", "d");
+        assertSelectedIds(doc.select("i:nth-child(5 of .x, #b)"), "f");
+        assertSelectedIds(doc.select("i:nth-last-child(2 of .x, #e)"), "e"); // f1 e2 d3 c4 a5 from end
+    }
+
+    @Test void nthChildOfNestedPseudos() {
+        Document doc = nthOfDoc();
+        assertSelectedIds(doc.select("i:nth-child(1 of i:is(.x, #e))"), "a");
+        assertSelectedIds(doc.select("i:nth-child(2n of .x:not(#d))"), "c"); // a1 c2 f3
+        assertSelectedIds(doc.select("i:nth-last-child(1 of i:has(i), .x)"), "f"); // no nested i; falls back to .x
+        // an "of" inside nested parens, quotes or escapes must not be treated as the top-level separator
+        assertSelectedIds(doc.select("i:nth-child(1 of i:is( of ), .x)"), "a"); // inner "of" is a tag selector in :is()
+        assertSelectedIds(doc.select("i:nth-child(2 of .x, [title=' of '])"), "c"); // quoted " of " ignored
+        Document escapeDoc = Jsoup.parse("<p><i id=z class='a of'></i><i id=y class='a of'></i></p>");
+        assertSelectedIds(escapeDoc.select("i:nth-child(2 of .a\\ of)"), "y");
+    }
+
+    @Test void nthChildOfKeywordCaseInsensitive() {
+        Document doc = nthOfDoc();
+        assertSelectedIds(doc.select("i:nth-child(2n OF .x)"), "c", "f");
+    }
+
+    @Test void nthChildWithoutOfUnchanged() {
+        Document doc = nthOfDoc();
+        assertSelectedIds(doc.select("i:nth-child(2n)"), "b", "d", "f"); // plain element positions
+        assertSelectedIds(doc.select("i:nth-last-child(odd)"), "b", "d", "f"); // f1 e2 d3 c4 b5 a6 from end
+        assertSelectedIds(doc.select("i:nth-of-type(2n)"), "b", "d", "f");
+        assertSelectedIds(doc.select("i:nth-last-of-type(1)"), "f");
+    }
+
+    @Test void nthChildOfAcrossParents() {
+        Document doc = Jsoup.parse(
+            "<p><i id=a class=x></i><i id=b></i></p>" +
+            "<p><i id=c class=x></i></p>");
+        assertSelectedIds(doc.select("i:nth-child(1 of .x)"), "a", "c"); // index resets per parent
+    }
+
+    @Test void nthChildOfStructuralSelectorList() {
+        // the of-list is evaluated relative to the query root, so a descendant combinator can reach above the parent
+        Document doc = Jsoup.parse(
+            "<section><div><p><i id=a class=x></i><i id=b class=x></i></p>" +
+            "<p><i id=c class=x></i><i id=d></i></p></div></section>");
+        assertSelectedIds(doc.select("section i:nth-child(2n of div .x)"), "b"); // only b is the 2nd filtered sibling in its parent
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {
+        "i:nth-child(2n of )",      // empty selector list
+        "i:nth-child( of .x)",      // empty / missing formula
+        "i:nth-child(x of .x)",     // invalid formula
+        "i:nth-child(2n of ,)",     // invalid selector list
+        "i:nth-child(2n of .x of .y)", // multiple top-level of
+        "i:nth-child(2n of)",       // of with no list and no whitespace
+        "i:nth-of-type(2n of .x)",  // of not accepted by nth-of-type
+        "i:nth-last-of-type(2n of .x)",
+        "i:nth-child(2n of .x)foo", // trailing tokens
+        "i:nth-child(2n of .x,)",   // trailing comma
+    })
+    void nthChildOfParseErrors(String query) {
+        Document doc = nthOfDoc();
+        assertThrows(Selector.SelectorParseException.class, () -> Selector.evaluatorOf(query), query);
+        assertThrows(Selector.SelectorParseException.class, () -> doc.select(query), query);
+    }
+
     // Tests that nested structural and combining evaluators get reset
     private static class ResetTracker extends Evaluator {
         boolean resetCalled = false;

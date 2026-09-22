@@ -1,5 +1,10 @@
 # jsoup Changelog
 
+## Unreleased
+
+### Improvements
+* Added support for the Selectors Level 4 `:nth-child(An+B of <selector-list>)` and `:nth-last-child(An+B of <selector-list>)` forms in `Element.select(String)` and `Element.is(String)`. The selector list is evaluated against the element children of the same parent; only matching siblings count toward the 1-based index (counted from the end for `nth-last-child`), the candidate itself must match the list, and other siblings do not occupy a position. The `of` separator is recognized only at the top level when bounded by whitespace, so occurrences within nested parentheses, quotes, or escapes are handled as part of the selector list. An empty list, an invalid formula or list, or multiple top-level `of` clauses throw a `Selector.SelectorParseException`. `:nth-of-type` and `:nth-last-of-type` do not accept an `of` clause.
+
 ## 1.23.2 (2026-Aug-26)
 
 ### Improvements

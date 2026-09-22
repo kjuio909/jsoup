@@ -647,6 +647,121 @@ public abstract class Evaluator {
     }
 
     /**
+     * Base for the {@code :nth-child(An+B of selector)} and {@code :nth-last-child(An+B of selector)} forms, where
+     * siblings that do not match the {@code of} selector list neither count toward the index nor occupy a position.
+     * Per the spec, the tested element must itself match the selector list.
+     */
+    public static abstract class CssNthOfFilterEvaluator extends CssNthEvaluator {
+        /** The {@code of} selector list, evaluated relative to the query root so that structural selectors (e.g. a
+         *  descendant combinator) can match ancestors above the candidate's parent. */
+        protected final Evaluator selector;
+
+        public CssNthOfFilterEvaluator(int step, int offset, Evaluator selector) {
+            super(step, offset);
+            this.selector = selector;
+        }
+
+        @Override
+        public boolean matches(Element root, Element element) {
+            final Element p = element.parent();
+            if (p == null || (p instanceof Document)) return false;
+            if (!selector.matches(root, element)) return false; // self must match the of-list
+
+            final int pos = calculatePosition(root, element);
+            if (pos < 1) return false;
+            if (a == 0) return pos == b;
+
+            return (pos - b) * a >= 0 && (pos - b) % a == 0;
+        }
+
+        @Override
+        protected void reset() {
+            selector.reset();
+            super.reset();
+        }
+
+        @Override protected int cost() {
+            return 10 * selector.cost();
+        }
+    }
+
+    /**
+     * Implements {@code :nth-child(An+B of selector)}: 1-based position counted forwards among the element children of
+     * the candidate's parent that match the selector list.
+     */
+    public static final class IsNthChildOf extends CssNthOfFilterEvaluator {
+        public IsNthChildOf(int step, int offset, Evaluator selector) {
+            super(step, offset, selector);
+        }
+
+        @Override
+        protected int calculatePosition(Element root, Element element) {
+            final Element p = element.parent();
+            if (p == null) return 0;
+
+            int pos = 0;
+            for (Element child = p.firstElementChild(); child != null; child = child.nextElementSibling()) {
+                if (selector.matches(root, child)) {
+                    pos++;
+                    if (child == element) return pos;
+                }
+            }
+            return 0; // self did not match the of-list
+        }
+
+        @Override
+        protected String getPseudoClass() {
+            return "nth-child";
+        }
+
+        @Override
+        public String toString() {
+            return String.format(":nth-child(%s of %s)", nthArgs(a, b), selector);
+        }
+    }
+
+    /**
+     * Implements {@code :nth-last-child(An+B of selector)}: 1-based position counted from the end among the element
+     * children of the candidate's parent that match the selector list.
+     */
+    public static final class IsNthLastChildOf extends CssNthOfFilterEvaluator {
+        public IsNthLastChildOf(int step, int offset, Evaluator selector) {
+            super(step, offset, selector);
+        }
+
+        @Override
+        protected int calculatePosition(Element root, Element element) {
+            final Element p = element.parent();
+            if (p == null) return 0;
+
+            int pos = 0;
+            for (Element child = p.lastElementChild(); child != null; child = child.previousElementSibling()) {
+                if (selector.matches(root, child)) {
+                    pos++;
+                    if (child == element) return pos;
+                }
+            }
+            return 0; // self did not match the of-list
+        }
+
+        @Override
+        protected String getPseudoClass() {
+            return "nth-last-child";
+        }
+
+        @Override
+        public String toString() {
+            return String.format(":nth-last-child(%s of %s)", nthArgs(a, b), selector);
+        }
+    }
+
+    private static String nthArgs(int a, int b) {
+        if (a == 0) return Integer.toString(b);
+        if (b == 0) return a + "n";
+        return a + "n" + (b > 0 ? "+" + b : Integer.toString(b));
+    }
+
+    /**
      * css pseudo class nth-of-type
      *
      */
