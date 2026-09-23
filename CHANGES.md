@@ -1,5 +1,10 @@
 # jsoup Changelog
 
+## 1.23.3 (PENDING)
+
+### Improvements
+* Added `FormElement#formData(Element, int, int)` and `FormElement#submit(Element, int, int)`, which build the form's submission data as if a given submit control (a `<button>` or an `<input type=submit|image>` associated with the form) was activated. Only that control contributes a submitter entry: `name=value` for named buttons, or the click coordinates (`name.x` / `name.y`, or `x` / `y` when unnamed) for image buttons.
+
 ## 1.23.2 (2026-Aug-26)
 
 ### Improvements

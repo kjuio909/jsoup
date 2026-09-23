@@ -162,6 +162,37 @@ public class FormElement extends Element {
             .method(method);
     }
 
+    /**
+     Prepare to submit this form, as if the given submit control was activated. A Connection object is created with the
+     request set up from the form values, including the submitter's own contribution (its {@code name=value}, or the
+     click coordinates for an image button). This Connection will inherit the settings and the cookies (etc) of the
+     connection/session used to request this Document (if any), as available in {@link Document#connection()}.
+     <p>You can then set up other options (like user-agent, timeout, cookies), then execute it.</p>
+
+     @param submitter the submit control that was activated; must be a {@code <button>} or an
+     {@code <input type=submit>} or {@code <input type=image>} associated with this form (i.e. contained in
+     {@link #elements()})
+     @param x the x-coordinate of the click, submitted by image buttons as {@code name.x} (or {@code x} when unnamed)
+     @param y the y-coordinate of the click, submitted by image buttons as {@code name.y} (or {@code y} when unnamed)
+     @return a connection prepared from the values of this form, in the same session as the one used to request it
+     @throws IllegalArgumentException if {@code submitter} is not an associated submit control, or if the form's action
+     URL is missing its base URI, or an absolute action URL is present but cannot be resolved. Make sure you pass the
+     document's base URI when parsing.
+     @see #formData(Element, int, int)
+     */
+    public Connection submit(Element submitter, int x, int y) {
+        List<Connection.KeyVal> data = formData(submitter, x, y); // validates the submitter before touching the action
+        String action = hasAttr("action") ? requireAbsUrl("action") : requireBaseUri();
+        Connection.Method method = attr("method").equalsIgnoreCase("POST") ?
+            Connection.Method.POST : Connection.Method.GET;
+
+        Document owner = ownerDocument();
+        Connection connection = owner != null? owner.connection().newRequest() : Jsoup.newSession();
+        return connection.url(action)
+            .data(data)
+            .method(method);
+    }
+
     private String requireBaseUri() {
         String baseUri = baseUri();
         Validate.notEmpty(baseUri, "Could not determine a form action URL for submit. Ensure you set a base URI when parsing.");
@@ -196,19 +227,73 @@ public class FormElement extends Element {
      @return a fresh, independent list of key vals
      */
     public List<Connection.KeyVal> formData() {
+        return collectData(null, 0, 0, elements());
+    }
+
+    /**
+     Get the data that this form submits when the given submit control is activated. Behaves like {@link #formData()},
+     with the same filtering and list semantics, except that among the submit controls ({@code <button>},
+     {@code <input type=submit>}, {@code <input type=image>}) only {@code submitter} contributes an entry, in its
+     document-order position:
+     <ul>
+     <li>a {@code <button>} or {@code <input type=submit>} with a non-empty {@code name} submits
+     {@code name=value};</li>
+     <li>an {@code <input type=image>} with a non-empty {@code name} submits {@code name.x=x} and {@code name.y=y};
+     without a name it submits {@code x=x} and {@code y=y}.</li>
+     </ul>
+     <p>As in {@link #formData()}, a submitter that is {@code disabled} (or inside a disabled {@code <fieldset>})
+     contributes nothing. The returned list is computed fresh on every call and is independent of the DOM.</p>
+     @param submitter the submit control that was activated; must be a {@code <button>} or an
+     {@code <input type=submit>} or {@code <input type=image>} associated with this form (i.e. contained in
+     {@link #elements()})
+     @param x the x-coordinate of the click, submitted by image buttons as {@code name.x} (or {@code x} when unnamed)
+     @param y the y-coordinate of the click, submitted by image buttons as {@code name.y} (or {@code y} when unnamed)
+     @return a fresh, independent list of key vals
+     @throws IllegalArgumentException if {@code submitter} is null, is not a {@code <button>} or
+     {@code <input type=submit|image>}, or is not associated with this form
+     */
+    public List<Connection.KeyVal> formData(Element submitter, int x, int y) {
+        Validate.notNull(submitter, "The submitter must not be null.");
+        String type = submitter.attr("type");
+        Validate.isTrue(submitter.nameIs("button") || (submitter.nameIs("input") &&
+                (type.equalsIgnoreCase("submit") || type.equalsIgnoreCase("image"))),
+            "The submitter must be a <button> or an <input type=submit|image>.");
+        Elements controls = elements();
+        Validate.isTrue(controls.contains(submitter), "The submitter must be a control associated with this form.");
+        return collectData(submitter, x, y, controls);
+    }
+
+    private List<Connection.KeyVal> collectData(@Nullable Element submitter, int x, int y, Elements controls) {
         ArrayList<Connection.KeyVal> data = new ArrayList<>();
 
         // iterate the form control elements and accumulate their values
-        for (Element el: elements()) {
-            if (!el.tag().isFormSubmittable()) continue; // contents are form listable, superset of submitable
-            if (el.nameIs("button")) continue; // <button> elements are never serialized by jsoup
+        for (Element el: controls) {
+            boolean isSubmitter = el == submitter;
+            if (!isSubmitter) { // the submitter itself is handled below, whatever its tag
+                if (!el.tag().isFormSubmittable()) continue; // contents are form listable, superset of submitable
+                if (el.nameIs("button")) continue; // <button> elements are never serialized by jsoup
+            }
             if (el.hasAttr("disabled")) continue; // skip disabled form inputs
             if (inDisabledFieldset(el)) continue; // skip controls in a disabled fieldset (first legend excepted)
             String name = el.attr("name");
-            if (name.length() == 0) continue;
             String type = el.attr("type");
 
+            if (isSubmitter) {
+                // the activated submit control contributes its own entry, in tree-order position
+                if (el.nameIs("input") && type.equalsIgnoreCase("image")) {
+                    String prefix = name.isEmpty() ? "" : name + ".";
+                    data.add(HttpConnection.KeyVal.create(prefix + "x", String.valueOf(x)));
+                    data.add(HttpConnection.KeyVal.create(prefix + "y", String.valueOf(y)));
+                } else if (name.length() != 0) {
+                    data.add(HttpConnection.KeyVal.create(name, el.val()));
+                }
+                continue;
+            }
+
+            if (name.length() == 0) continue;
+
             if (type.equalsIgnoreCase("button") || type.equalsIgnoreCase("image")) continue; // browsers don't submit these
+            if (submitter != null && type.equalsIgnoreCase("submit")) continue; // only the activated submit control counts
 
             if (el.nameIs("select")) {
                 boolean multiple = el.hasAttr("multiple");
