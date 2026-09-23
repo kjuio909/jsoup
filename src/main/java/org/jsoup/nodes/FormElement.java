@@ -4,15 +4,12 @@ import org.jsoup.Connection;
 import org.jsoup.Jsoup;
 import org.jsoup.helper.HttpConnection;
 import org.jsoup.helper.Validate;
-import org.jsoup.internal.SharedConstants;
-import org.jsoup.internal.StringUtil;
 import org.jsoup.parser.Tag;
 import org.jsoup.select.Elements;
-import org.jsoup.select.Evaluator;
-import org.jsoup.select.Selector;
 import org.jspecify.annotations.Nullable;
 
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 
 /**
@@ -20,9 +17,10 @@ import java.util.List;
  * form to easily be submitted.
  */
 public class FormElement extends Element {
+    // Controls the parser associated with this form via its form-element pointer. Includes non-submittable listed
+    // controls (button, fieldset, output), and submittables foster-parented outside the form by table parse rules.
+    // Ownership is re-resolved on every elements() call, so node moves and form/id attribute edits are reflected.
     private final Elements linkedEls = new Elements();
-    // contains form submittable elements that were linked during the parse (and due to parse rules, may no longer be a child of this form)
-    private static final Evaluator submittable = Selector.evaluatorOf(StringUtil.join(SharedConstants.FormSubmitTags, ", "));
 
     /**
      * Create a new, standalone form element.
@@ -37,18 +35,76 @@ public class FormElement extends Element {
 
     /**
      * Get the list of form control elements associated with this form.
+     * <p>The association is resolved fresh on every call, following the HTML form-ownership rules:</p>
+     * <ul>
+     * <li>an {@code input}, {@code keygen}, {@code object}, {@code select}, or {@code textarea} carrying a
+     * {@code form} attribute belongs to the form in the same document whose {@code id} matches — the control may live
+     * outside that form, or even inside another form; this takes precedence over any ancestor form;</li>
+     * <li>without a {@code form} attribute, the control belongs to its nearest ancestor form;</li>
+     * <li>a {@code form} attribute naming a missing element, or an element that is not a form, leaves the control
+     * unowned, even when it is nested inside a form;</li>
+     * <li>controls the parser associated with this form but placed outside it by table foster-parenting remain
+     * associated unless a {@code form} attribute or an ancestor form says otherwise.</li>
+     * </ul>
+     * <p>The result is in document order with no duplicates, and reflects moving nodes and editing
+     * {@code form}/{@code id} attributes after parsing.</p>
      * @return form controls associated with this element.
      */
     public Elements elements() {
-        // As elements may have been added or removed from the DOM after parse, prepare a new list that unions them:
-        Elements els = select(submittable); // current form children
-        for (Element linkedEl : linkedEls) {
-            if (linkedEl.ownerDocument() != null && !els.contains(linkedEl)) {
-                els.add(linkedEl); // adds previously linked elements, that weren't previously removed from the DOM
-            }
+        // one document-order walk over the whole document (or this standalone form's subtree); naturally deduplicated
+        Elements scope = ownerDocument() != null ? ownerDocument().getAllElements() : getAllElements();
+
+        // index the first element carrying each id, in document order — mirrors getElementById, including forward
+        // references and duplicate ids; the control is owned only when that element is this form
+        HashMap<String, Element> firstById = new HashMap<>();
+        for (Element el : scope) {
+            String id = el.id();
+            if (!id.isEmpty() && !firstById.containsKey(id)) firstById.put(id, el);
         }
 
-        return els;
+        Elements out = new Elements();
+        for (Element el : scope) {
+            if (el.tag().isFormSubmittable()) {
+                if (isOwner(el, firstById)) out.add(el);
+            } else if (el.ownerDocument() != null && linkedEls.contains(el)
+                    && ownsLinkedControl(el)) {
+                // non-submittable parser-linked controls (button, fieldset, output)
+                out.add(el);
+            }
+        }
+        return out;
+    }
+
+    /**
+     * Ownership for the non-submittable controls the parser linked (button, fieldset, output): follow an ancestor
+     * form once the control is placed inside one, otherwise retain the parse-time linkage.
+     */
+    private boolean ownsLinkedControl(Element el) {
+        FormElement ancestor = nearestAncestorForm(el);
+        return ancestor == null || ancestor == this;
+    }
+
+    /**
+     * Determine whether this form owns the given submittable control, per the form-attribute / ancestor rules.
+     */
+    private boolean isOwner(Element el, HashMap<String, Element> firstById) {
+        if (el.hasAttr("form")) {
+            // explicit association only: target must be this form in the same document; a present-but-empty value, a
+            // missing id, or a target that is not a form all leave the control unowned — no ancestor fallback
+            Element target = firstById.get(el.attr("form"));
+            return target == this;
+        }
+        FormElement ancestor = nearestAncestorForm(el);
+        if (ancestor != null) return ancestor == this;
+        // no ancestor form (e.g. foster-parented out of a table during parsing): the parse linkage decides
+        return linkedEls.contains(el);
+    }
+
+    private static @Nullable FormElement nearestAncestorForm(Element el) {
+        for (Element p = el.parent(); p != null; p = p.parent()) {
+            if (p instanceof FormElement) return (FormElement) p;
+        }
+        return null;
     }
 
     /**

@@ -379,4 +379,191 @@ public class FormElementTest {
         form.selectFirst("input").attr("value", "2");
         assertEquals("a=2", form.formData().get(0).toString());
     }
+
+    // form="" attribute ownership: https://developer.mozilla.org/docs/Web/HTML/Element/input#form
+    @Test void controlOutsideFormIsLinkedByFormAttribute() {
+        String html = "<form id=f><input name=inside value=1></form>" +
+            "<input name=outside value=2 form=f>";
+        Document doc = Jsoup.parse(html);
+        FormElement form = (FormElement) doc.selectFirst("#f");
+        assertEquals(2, form.elements().size());
+        List<Connection.KeyVal> data = form.formData();
+        assertEquals("inside=1", data.get(0).toString());
+        assertEquals("outside=2", data.get(1).toString()); // document order
+    }
+
+    @Test void formAttributeWorksForAllSubmittableTags() {
+        String html = "<form id=f></form>" +
+            "<input form=f><keygen form=f><object form=f></object>" +
+            "<select form=f></select><textarea form=f></textarea>";
+        Document doc = Jsoup.parse(html);
+        FormElement form = (FormElement) doc.selectFirst("#f");
+        assertEquals(5, form.elements().size());
+    }
+
+    @Test void formAttributeAcrossFormsBeatsAncestor() {
+        String html = "<form id=f></form>" +
+            "<form id=g><input name=x value=1 form=f><select name=y form=f>" +
+            "<option value=a selected></select></form>";
+        Document doc = Jsoup.parse(html);
+        FormElement f = (FormElement) doc.selectFirst("#f");
+        FormElement g = (FormElement) doc.selectFirst("#g");
+
+        assertEquals(2, f.elements().size());
+        assertEquals(2, f.formData().size());
+        assertEquals("x=1", f.formData().get(0).toString());
+        assertEquals("y=a", f.formData().get(1).toString());
+        assertTrue(g.elements().isEmpty()); // claimed away by f's id
+        assertTrue(g.formData().isEmpty());
+    }
+
+    @Test void formAttributeTakesPrecedenceOverAncestor() {
+        String html = "<form id=f></form><form id=g><input name=x value=1 form=f></form>";
+        Document doc = Jsoup.parse(html);
+        FormElement f = (FormElement) doc.selectFirst("#f");
+        FormElement g = (FormElement) doc.selectFirst("#g");
+        assertEquals(1, f.elements().size());
+        assertTrue(g.elements().isEmpty());
+    }
+
+    @Test void missingFormAttributeTargetMeansNoOwner() {
+        String html = "<form id=f><input name=x value=1 form=nope></form>";
+        Document doc = Jsoup.parse(html);
+        FormElement form = (FormElement) doc.selectFirst("#f");
+        assertTrue(form.elements().isEmpty());
+        assertTrue(form.formData().isEmpty());
+    }
+
+    @Test void nonFormFormAttributeTargetMeansNoOwner() {
+        String html = "<div id=f></div><form id=g><input name=x form=f></form>";
+        Document doc = Jsoup.parse(html);
+        FormElement g = (FormElement) doc.selectFirst("#g");
+        assertTrue(g.elements().isEmpty()); // div is not a form; no ancestor fallback
+    }
+
+    @Test void emptyFormAttributeMeansNoOwner() {
+        // a present but empty form attribute is an explicit, unresolved reference
+        String html = "<form id=f><input name=x value=1 form=''></form>";
+        Document doc = Jsoup.parse(html);
+        FormElement form = (FormElement) doc.selectFirst("#f");
+        assertTrue(form.elements().isEmpty());
+    }
+
+    @Test void noFormAttributeFallsBackToNearestAncestorForm() {
+        // nested forms are rejected by the parser, so build them via the DOM to exercise nearest-ancestor precedence
+        Document doc = Jsoup.parse("<form id=f><input name=outer value=1></form><form id=g></form>");
+        FormElement f = (FormElement) doc.selectFirst("#f");
+        FormElement g = (FormElement) doc.selectFirst("#g");
+        f.appendChild(g);                 // g now nested inside f
+        g.appendElement("input").attr("name", "inner").attr("value", "2");
+
+        assertEquals(1, f.elements().size());  // outer input only
+        assertEquals("outer=1", f.formData().get(0).toString());
+        assertEquals(1, g.elements().size());  // nearest ancestor wins
+        assertEquals("inner=2", g.formData().get(0).toString());
+    }
+
+    @Test void formAttributeMayReferenceLaterForm() {
+        String html = "<input name=x value=1 form=f><form id=f></form>";
+        Document doc = Jsoup.parse(html);
+        FormElement form = (FormElement) doc.selectFirst("#f");
+        assertEquals(1, form.elements().size());
+        assertEquals("x=1", form.formData().get(0).toString());
+    }
+
+    @Test void duplicateFormIdsResolveToFirstForm() {
+        String html = "<form id=f><input name=first value=1></form>" +
+            "<form id=f><input name=second value=2></form>" +
+            "<input name=third value=3 form=f>";
+        Document doc = Jsoup.parse(html);
+        Elements forms = doc.select("form");
+        FormElement f1 = (FormElement) forms.get(0);
+        FormElement f2 = (FormElement) forms.get(1);
+
+        // the external control associates with the first form carrying the id
+        assertEquals(2, f1.elements().size());
+        assertEquals("first=1", f1.formData().get(0).toString());
+        assertEquals("third=3", f1.formData().get(1).toString());
+        assertEquals(1, f2.elements().size());
+        assertEquals("second=2", f2.formData().get(0).toString());
+    }
+
+    @Test void ownershipRecomputedAfterMovingNode() {
+        String html = "<form id=a><input name=x value=1></form><form id=b></form>";
+        Document doc = Jsoup.parse(html);
+        FormElement a = (FormElement) doc.selectFirst("#a");
+        FormElement b = (FormElement) doc.selectFirst("#b");
+        Element x = doc.selectFirst("input");
+
+        assertEquals(1, a.elements().size());
+        assertTrue(b.elements().isEmpty());
+
+        b.appendChild(x); // move into the other form
+        assertTrue(a.elements().isEmpty());
+        assertEquals(1, b.elements().size());
+        assertEquals("x=1", b.formData().get(0).toString());
+
+        x.remove(); // detach entirely
+        assertTrue(a.elements().isEmpty());
+        assertTrue(b.elements().isEmpty());
+    }
+
+    @Test void ownershipRecomputedAfterFormAttributeAndIdChanges() {
+        String html = "<form id=f></form><form id=g><input name=x value=1></form>";
+        Document doc = Jsoup.parse(html);
+        FormElement f = (FormElement) doc.selectFirst("#f");
+        FormElement g = (FormElement) doc.selectFirst("#g");
+        Element x = doc.selectFirst("input");
+
+        assertTrue(f.elements().isEmpty());
+        assertEquals(1, g.elements().size());
+
+        x.attr("form", "f"); // point it at f
+        assertEquals(1, f.elements().size());
+        assertTrue(g.elements().isEmpty());
+
+        f.id("h"); // target id no longer matches
+        assertTrue(f.elements().isEmpty());
+        assertTrue(g.elements().isEmpty());
+
+        f.id("f"); // restored
+        assertEquals(1, f.elements().size());
+
+        x.removeAttr("form"); // back to nearest ancestor (g)
+        assertTrue(f.elements().isEmpty());
+        assertEquals(1, g.elements().size());
+    }
+
+    @Test void elementsAreDocumentOrderedAndDeduplicated() {
+        String html = "<form id=f></form>" +
+            "<input id=a form=f><div><input id=b form=f></div>" +
+            "<form id=g><input id=c form=f></form><input id=d>";
+        Document doc = Jsoup.parse(html);
+        FormElement f = (FormElement) doc.selectFirst("#f");
+        SelectorTest.assertSelectedIds(f.elements(), "a", "b", "c");
+    }
+
+    @Test void submitCarriesActionMethodAndFormData() {
+        String html = "<form id=f action='/search' method='post'><input name=q></form>" +
+            "<input name=extra value=x form=f>";
+        Document doc = Jsoup.parse(html, "http://example.com/");
+        FormElement form = (FormElement) doc.selectFirst("#f");
+        Connection con = form.submit();
+
+        assertEquals(Connection.Method.POST, con.request().method());
+        assertEquals("http://example.com/search", con.request().url().toExternalForm());
+        @SuppressWarnings("unchecked")
+        List<Connection.KeyVal> requestData = (List<Connection.KeyVal>) con.request().data();
+        List<Connection.KeyVal> formData = form.formData();
+        assertEquals(formData.size(), requestData.size());
+        assertEquals("q=", requestData.get(0).toString());
+        assertEquals("extra=x", requestData.get(1).toString()); // outside-form control submitted too
+    }
+
+    @Test void submitWithUnresolvableAbsoluteActionThrows() {
+        String html = "<form action='http://exa mple.com/x'><input name=q></form>";
+        Document doc = Jsoup.parse(html, "http://example.com/");
+        FormElement form = (FormElement) doc.selectFirst("form");
+        assertThrows(IllegalArgumentException.class, form::submit);
+    }
 }
