@@ -11,6 +11,7 @@ import org.jsoup.nodes.TextNode;
 import org.jsoup.nodes.XmlDeclaration;
 import org.jsoup.parser.ParseSettings;
 import org.jsoup.helper.Regex;
+import org.jspecify.annotations.Nullable;
 
 import java.util.List;
 import java.util.function.Predicate;
@@ -567,20 +568,30 @@ public abstract class Evaluator {
         protected final int a;
         /** Offset */
         protected final int b;
+        /** Optional "of S" selector filter; when set, only siblings matching it are indexed. */
+        protected final @Nullable Evaluator ofEvaluator;
 
         public CssNthEvaluator(int step, int offset) {
-            this.a = step;
-            this.b = offset;
+            this(step, offset, null);
         }
 
         public CssNthEvaluator(int offset) {
-            this(0, offset);
+            this(0, offset, null);
+        }
+
+        protected CssNthEvaluator(int step, int offset, @Nullable Evaluator ofEvaluator) {
+            this.a = step;
+            this.b = offset;
+            this.ofEvaluator = ofEvaluator;
         }
 
         @Override
         public boolean matches(Element root, Element element) {
             final Element p = element.parent();
             if (p == null || (p instanceof Document)) return false;
+
+            // In the "An+B of S" form, the element must itself match S, and only matching siblings are indexed
+            if (ofEvaluator != null && !ofEvaluator.matches(root, element)) return false;
 
             final int pos = calculatePosition(root, element);
             if (a == 0) return pos == b;
@@ -590,11 +601,17 @@ public abstract class Evaluator {
 
         @Override
         public String toString() {
-            String format =
-                (a == 0) ? ":%s(%3$d)"    // only offset (b)
-                : (b == 0) ? ":%s(%2$dn)" // only step (a)
-                : ":%s(%2$dn%3$+d)";      // step, offset
-            return String.format(format, getPseudoClass(), a, b);
+            final String anb;
+            if (a == 0)
+                anb = Integer.toString(b);                            // only offset (b)
+            else if (b == 0)
+                anb = a + "n";                                        // only step (a)
+            else
+                anb = a + "n" + (b > 0 ? "+" + b : Integer.toString(b)); // step, offset
+            String str = ":" + getPseudoClass() + "(" + anb;
+            return ofEvaluator != null ?
+                str + " of " + ofEvaluator + ")" :
+                str + ")";
         }
 
         protected abstract String getPseudoClass();
@@ -625,6 +642,36 @@ public abstract class Evaluator {
     }
 
     /**
+     * {@code :nth-child(An+B of S)} — like {@link IsNthChild}, but only element siblings matching the selector
+     * {@code S} are counted, in document order.
+     */
+    public static final class IsNthChildOf extends CssNthEvaluator {
+        public IsNthChildOf(int step, int offset, Evaluator ofEvaluator) {
+            super(step, offset, ofEvaluator);
+        }
+
+        @Override
+        protected int calculatePosition(Element root, Element element) {
+            final Element parent = element.parent();
+            if (parent == null) return 0;
+
+            int pos = 0;
+            final int size = parent.childrenSize();
+            for (int i = 0; i < size; i++) {
+                final Element sibling = parent.child(i);
+                if (ofEvaluator.matches(root, sibling)) pos++;
+                if (sibling == element) break;
+            }
+            return pos;
+        }
+
+        @Override
+        protected String getPseudoClass() {
+            return "nth-child";
+        }
+    }
+
+    /**
      * css pseudo class :nth-last-child)
      *
      * @see IndexEquals
@@ -644,6 +691,35 @@ public abstract class Evaluator {
 		protected String getPseudoClass() {
 			return "nth-last-child";
 		}
+    }
+
+    /**
+     * {@code :nth-last-child(An+B of S)} — like {@link IsNthLastChild}, but only element siblings matching the
+     * selector {@code S} are counted, in reverse document order.
+     */
+    public static final class IsNthLastChildOf extends CssNthEvaluator {
+        public IsNthLastChildOf(int step, int offset, Evaluator ofEvaluator) {
+            super(step, offset, ofEvaluator);
+        }
+
+        @Override
+        protected int calculatePosition(Element root, Element element) {
+            final Element parent = element.parent();
+            if (parent == null) return 0;
+
+            int pos = 0;
+            for (int i = parent.childrenSize() - 1; i >= 0; i--) {
+                final Element sibling = parent.child(i);
+                if (ofEvaluator.matches(root, sibling)) pos++;
+                if (sibling == element) break;
+            }
+            return pos;
+        }
+
+        @Override
+        protected String getPseudoClass() {
+            return "nth-last-child";
+        }
     }
 
     /**

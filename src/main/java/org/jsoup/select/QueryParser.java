@@ -229,13 +229,13 @@ public class QueryParser implements AutoCloseable {
             case "not":
                 return not();
             case "nth-child":
-                return cssNthChild(false, false);
+                return cssNthChild("nth-child");
             case "nth-last-child":
-                return cssNthChild(true, false);
+                return cssNthChild("nth-last-child");
             case "nth-of-type":
-                return cssNthChild(false, true);
+                return cssNthChild("nth-of-type");
             case "nth-last-of-type":
-                return cssNthChild(true, true);
+                return cssNthChild("nth-last-of-type");
             case "first-child":
                 return new Evaluator.IsFirstChild();
             case "last-child":
@@ -385,8 +385,48 @@ public class QueryParser implements AutoCloseable {
     private static final Pattern NthStepOffset = Pattern.compile("(([+-])?(\\d+)?)n(\\s*([+-])?\\s*\\d+)?", Pattern.CASE_INSENSITIVE);
     private static final Pattern NthOffset = Pattern.compile("([+-])?(\\d+)");
 
-    private Evaluator cssNthChild(boolean last, boolean ofType) {
-        String arg = normalize(consumeParens()); // arg is like "odd", or "-n+2", within nth-child(odd)
+    private Evaluator cssNthChild(String pseudo) {
+        final boolean last = pseudo.startsWith("nth-last");
+        final boolean ofType = pseudo.endsWith("of-type");
+
+        if (!tq.matchChomp('('))
+            throw new Selector.SelectorParseException(
+                "Could not parse query '%s': ':%s(...)' requires an argument", query, pseudo);
+        tq.consumeWhitespace();
+
+        // Read the An+B argument, watching for the optional " of S" clause.
+        final StringBuilder anb = StringUtil.borrowBuilder();
+        boolean hasOf = false;
+        while (!tq.isEmpty()) {
+            final char c = tq.toString().charAt(0);
+            if (c == ')') break;
+            if (StringUtil.isWhitespace(c)) {
+                tq.consumeWhitespace();
+                if (tq.isEmpty()) break;
+                if (tq.matches(')')) break;
+                final String rest = tq.toString(); // "of" must be a whitespace-delimited identifier
+                final char afterOf = rest.length() > 2 ? rest.charAt(2) : ')';
+                final boolean ofBoundary =
+                    !Character.isLetterOrDigit(afterOf) && afterOf != '_' && afterOf != '-';
+                if (rest.regionMatches(true, 0, "of", 0, 2) && ofBoundary) {
+                    tq.matchChomp("of");
+                    hasOf = true;
+                    break;
+                }
+                anb.append(' '); // whitespace internal to An+B, such as "2n + 1"
+                continue;
+            }
+            if (!isNthArgChar(c))
+                throw new Selector.SelectorParseException(
+                    "Could not parse nth-index '%s%s': unexpected format", anb, c);
+            anb.append(tq.consume());
+        }
+        final String arg = normalize(StringUtil.releaseBuilder(anb));
+
+        if (ofType && hasOf)
+            throw new Selector.SelectorParseException(
+                "Could not parse query '%s': ':%s' does not support an 'of' selector", query, pseudo);
+
         final int step, offset;
         if ("odd".equals(arg)) {
             step = 2;
@@ -411,9 +451,31 @@ public class QueryParser implements AutoCloseable {
             }
         }
 
+        Evaluator ofEvaluator = null;
+        if (hasOf) {
+            tq.consumeWhitespace();
+            if (tq.isEmpty() || tq.matches(')'))
+                throw new Selector.SelectorParseException(
+                    "Could not parse query '%s': ':%s(An+B of S)' requires a selector S", query, pseudo);
+            ofEvaluator = parseSelectorGroup();
+            tq.consumeWhitespace();
+        }
+        if (!tq.matchChomp(')'))
+            throw new Selector.SelectorParseException(
+                "Could not parse query '%s': unexpected token at '%s'", query, tq.remainder());
+
+        if (ofEvaluator != null)
+            return last
+                ? new Evaluator.IsNthLastChildOf(step, offset, ofEvaluator)
+                : new Evaluator.IsNthChildOf(step, offset, ofEvaluator);
+
         return ofType
             ? (last ? new Evaluator.IsNthLastOfType(step, offset) : new Evaluator.IsNthOfType(step, offset))
             : (last ? new Evaluator.IsNthLastChild(step, offset) : new Evaluator.IsNthChild(step, offset));
+    }
+
+    private static boolean isNthArgChar(char c) {
+        return StringUtil.isAsciiLetter(c) || StringUtil.isDigit(c) || c == 'n' || c == 'N' || c == '+' || c == '-';
     }
 
     private String consumeParens() {

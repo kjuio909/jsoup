@@ -7,6 +7,9 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.util.Arrays;
+import java.util.List;
+
 import static org.junit.jupiter.api.Assertions.*;
 
 
@@ -154,6 +157,119 @@ public class CssTest {
 
 		check(html.select("#type span:nth-last-of-type(-2n+5)"), "6", "8", "10");
 		check(html.select("#type :nth-last-of-type(+5)"), "6", "6", "6", "6");
+	}
+
+	private static final String nthOfHtml =
+		"<div id=s><b id=x>a</b><i id=y>b</i><b id=z>c</b><em>d</em><b id=w>e</b></div>";
+
+	@Test
+	public void nthChildOfSelector_examples() {
+		Document doc = Jsoup.parse(nthOfHtml);
+
+		Elements secondB = doc.select("#s>:nth-child(2 of b)");
+		assertEquals(1, secondB.size());
+		assertEquals("z", secondB.get(0).id());
+
+		Elements lastBOrI = doc.select("#s>:nth-last-child(1 of b,i)");
+		assertEquals(1, lastBOrI.size());
+		assertEquals("w", lastBOrI.get(0).id());
+	}
+
+	@Test
+	public void nthChildOfSelector_indexesOnlyMatchingSiblings() {
+		Document doc = Jsoup.parse(nthOfHtml);
+
+		assertEquals(Arrays.asList("x"), ids(doc, "#s>:nth-child(1 of b)"));
+		assertEquals(Arrays.asList("z"), ids(doc, "#s>:nth-child(2 of b)"));
+		assertEquals(Arrays.asList("w"), ids(doc, "#s>:nth-child(3 of b)"));
+		assertEquals(Arrays.asList("x", "w"), ids(doc, "#s>:nth-child(odd of b)"));
+		assertEquals(Arrays.asList("z"), ids(doc, "#s>:nth-child(even of b)"));
+		assertEquals(Arrays.asList("x", "w"), ids(doc, "#s>:nth-child(2n+1 of b)"));
+
+		assertEquals(Arrays.asList("w"), ids(doc, "#s>:nth-last-child(1 of b)"));
+		assertEquals(Arrays.asList("z"), ids(doc, "#s>:nth-last-child(2 of b)"));
+		assertEquals(Arrays.asList("x"), ids(doc, "#s>:nth-last-child(3 of b)"));
+		assertEquals(Arrays.asList("x", "w"), ids(doc, "#s>:nth-last-child(odd of b)"));
+
+		// selector list: b and i interleaved; em is skipped
+		assertEquals(Arrays.asList("y"), ids(doc, "#s>:nth-child(2 of b,i)"));
+		assertEquals(Arrays.asList("z"), ids(doc, "#s>:nth-last-child(2 of b,i)"));
+		assertEquals(Arrays.asList("y", "w"), ids(doc, "#s>:nth-child(even of b,i)"));
+
+		// non-matching candidate is never returned, regardless of raw sibling position
+		assertTrue(ids(doc, "#s em:nth-child(4 of b)").isEmpty());
+	}
+
+	@Test
+	public void nthChildOfSelector_compoundAndComplexS() {
+		Document doc = Jsoup.parse(
+			"<div id=s><b class=hit id=x>a</b><i>b</i><b id=z>c</b><b class=hit id=w>e</b></div>");
+
+		assertEquals(Arrays.asList("w"), ids(doc, "#s>:nth-child(2 of b.hit)"));
+		assertEquals(Arrays.asList("w"), ids(doc, "#s>:nth-last-child(1 of b.hit)"));
+
+		// complex selector in S: candidate b must be a direct child of a section
+		Document doc2 = Jsoup.parse(
+			"<div><section><b id=x>1</b></section><section><b id=y>2</b><b id=z>3</b></section></div>");
+		assertEquals(Arrays.asList("z"), ids(doc2, "div :nth-child(2 of section>b)"));
+	}
+
+	@Test
+	public void nthChildOfSelector_resetsPerParent() {
+		Document doc = Jsoup.parse(
+			"<div><p><b id=a1>1</b><i>x</i><b id=a2>2</b></p>"
+				+ "<p><b id=b1>3</b><b id=b2>4</b></p></div>");
+		assertEquals(Arrays.asList("a2", "b2"), ids(doc, "div p>:nth-child(2 of b)"));
+		assertEquals(Arrays.asList("a2", "b2"), ids(doc, "div p>:nth-last-child(1 of b)"));
+	}
+
+	@Test
+	public void nthChildOfSelector_whitespace() {
+		Document doc = Jsoup.parse(nthOfHtml);
+		assertEquals(Arrays.asList("z"), ids(doc, "#s>:nth-child( 2 of b )"));
+		assertEquals(Arrays.asList("y"), ids(doc, "#s>:nth-child(2  of  b , i )"));
+	}
+
+	@Test
+	public void nthChildOfSelector_plainFormsUnchanged() {
+		// no "of" clause: all element siblings are counted, as before
+		assertEquals(Arrays.asList("y"), ids(Jsoup.parse(nthOfHtml), "#s>:nth-child(2)"));
+		check(html.select("#pseudo :nth-child(odd)"), "1", "3", "5", "7", "9");
+		check(html.select("#pseudo :nth-last-child(even)"), "1", "3", "5", "7", "9");
+		check(html.select("#type p:nth-of-type(2n)"), "2", "4", "6", "8", "10");
+		check(html.select("#type p:nth-last-of-type(2n)"), "1", "3", "5", "7", "9");
+	}
+
+	@Test
+	public void nthChildOfSelector_parseErrors() {
+		String[] invalid = {
+			":nth-child(2 of )",     // empty S
+			":nth-child(",           // unclosed parens
+			":nth-child(2 of",       // unclosed after of
+			":nth-child(2 of b",     // unclosed after selector
+			":nth-child(2 of b,",    // truncated selector list
+			":nth-child(2 of ,b)",   // empty first list item
+			":nth-child(of b)",      // missing An+B
+			":nth-child(2of b)",     // of must be whitespace delimited
+			":nth-of-type(2 of b)",       // of not allowed for nth-of-type
+			":nth-last-of-type(2 of b)",  // nor for nth-last-of-type
+		};
+		for (String q : invalid) {
+			assertThrows(Selector.SelectorParseException.class, () -> QueryParser.parse(q),
+				() -> "expected parse exception for " + q);
+		}
+	}
+
+	@Test
+	public void nthChildOfSelector_failureDoesNotChangeDom() {
+		Document doc = Jsoup.parse(nthOfHtml);
+		String before = doc.html();
+		assertThrows(Selector.SelectorParseException.class, () -> doc.select("#s>:nth-child(2 of )"));
+		assertEquals(before, doc.html());
+	}
+
+	private static java.util.List<String> ids(Document doc, String query) {
+		return doc.select(query).eachAttr("id");
 	}
 
 	@Test
