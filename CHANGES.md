@@ -1,5 +1,10 @@
 # jsoup Changelog
 
+## Unreleased
+
+### Improvements
+* Added support for the `:nth-child(An+B of S)` and `:nth-last-child(An+B of S)` CSS selectors, where `S` is a comma-separated selector list. Only sibling elements matching `S` are candidates, and they are counted in document order (or reverse for nth-last-child). For example, `:nth-child(2 of b)` matches the second `b` element among its element siblings. The `of S` form is only supported by `:nth-child` and `:nth-last-child`; an empty `S`, unbalanced parentheses, or a malformed selector list is a parse error.
+
 ## 1.23.2 (2026-Aug-26)
 
 ### Improvements

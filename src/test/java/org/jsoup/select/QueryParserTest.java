@@ -143,6 +143,45 @@ public class QueryParserTest {
     }
 
     @Test
+    public void nthChildOfSelector() {
+        // :nth-child(An+B of S) / :nth-last-child(An+B of S) compile to an of-filter evaluator
+        Document doc = Jsoup.parse(
+            "<div id=s><b id=x>a</b><i id=y>b</i><b id=z>c</b><em>d</em><b id=w>e</b></div>");
+        assertEquals("z", doc.selectFirst("#s>:nth-child(2 of b)").id());
+        assertEquals("w", doc.selectFirst("#s>:nth-last-child(1 of b,i)").id());
+        // the evaluator renders the of clause
+        assertEquals(":nth-child(2n of b)", QueryParser.parse(":nth-child(2n of b)").toString());
+        assertEquals(":nth-last-child(3 of b, i)", QueryParser.parse(":nth-last-child(3 of b, i)").toString());
+    }
+
+    @Test
+    public void exceptOnNthChildOfErrors() {
+        // S must not be empty
+        assertThrows(SelectorParseException.class, () -> QueryParser.parse(":nth-child(2 of )"));
+        assertThrows(SelectorParseException.class, () -> QueryParser.parse(":nth-child(2 of)"));
+        assertThrows(SelectorParseException.class, () -> QueryParser.parse(":nth-child()"));
+        // unbalanced parens
+        assertThrows(SelectorParseException.class, () -> QueryParser.parse(":nth-child(2 of b"));
+        assertThrows(SelectorParseException.class, () -> QueryParser.parse(":nth-child(2 of b, i"));
+        // a broken selector list inside balanced parens
+        assertThrows(SelectorParseException.class, () -> QueryParser.parse(":nth-child(2 of b,)"));
+        assertThrows(SelectorParseException.class, () -> QueryParser.parse(":nth-child(2 of ,b)"));
+        assertThrows(SelectorParseException.class, () -> QueryParser.parse(":nth-child(2 of b >)"));
+        // of S is only valid for nth-child and nth-last-child
+        assertThrows(SelectorParseException.class, () -> QueryParser.parse(":nth-of-type(2 of b)"));
+        assertThrows(SelectorParseException.class, () -> QueryParser.parse(":nth-last-of-type(2 of b)"));
+    }
+
+    @Test
+    public void nthChildOfFailureDoesNotMutateDom() {
+        Document doc = Jsoup.parse(
+            "<div id=s><b id=x>a</b><i id=y>b</i><b id=z>c</b><em>d</em><b id=w>e</b></div>");
+        String before = doc.toString();
+        assertThrows(SelectorParseException.class, () -> doc.select("#s>:nth-child(2 of b,"));
+        assertEquals(before, doc.toString());
+    }
+
+    @Test
     public void exceptOnEmptySelector() {
         SelectorParseException exception = assertThrows(SelectorParseException.class, () -> QueryParser.parse(""));
         assertEquals("String must not be empty", exception.getMessage());

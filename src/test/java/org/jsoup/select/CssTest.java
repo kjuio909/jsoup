@@ -157,6 +157,50 @@ public class CssTest {
 	}
 
 	@Test
+	public void nthChildOfSelector() {
+		// :nth-child(An+B of S) - only siblings matching S are candidates, counted in document order
+		Document doc = Jsoup.parse(
+			"<div id=s><b id=x>a</b><i id=y>b</i><b id=z>c</b><em>d</em><b id=w>e</b></div>");
+
+		assertEquals("z", doc.selectFirst("#s>:nth-child(2 of b)").id());
+		assertEquals("w", doc.selectFirst("#s>:nth-last-child(1 of b,i)").id());
+
+		// only matching siblings are counted
+		assertEquals("x", doc.selectFirst("#s>:nth-child(1 of b)").id());
+		assertEquals("z", doc.selectFirst("#s>:nth-last-child(2 of b)").id());
+		assertEquals("w", doc.selectFirst("#s>:nth-last-child(1 of b)").id());
+		assertEquals(ids(doc, "#s>:nth-child(odd of b)"), "x,w");
+		assertEquals(ids(doc, "#s>:nth-child(even of b)"), "z");
+		assertEquals(ids(doc, "#s>:nth-child(-n+2 of b)"), "x,z");
+		assertEquals(ids(doc, "#s>:nth-child(2 of b, i)"), "y");
+		// whitespace inside the parens is fine
+		assertEquals("z", doc.selectFirst("#s>:nth-child( 2 of b )").id());
+		assertEquals("w", doc.selectFirst("#s>:nth-last-child(1 of b , i)").id());
+		// "of" inside an attribute value is not the keyword
+		assertEquals("x", doc.selectFirst("#s>:nth-child(1 of [id], [data-x='of b'])").id());
+		// y is globally the 2nd child but the 1st (and only) i: filtering changes the position
+		assertEquals("y", doc.selectFirst("#s>:nth-child(1 of i)").id());
+		assertTrue(doc.select("#s>:nth-child(2 of i)").isEmpty());
+		assertTrue(doc.select("#s>:nth-child(2 of em)").isEmpty()); // em is 4th of all, no 2nd em
+	}
+
+	@Test
+	public void nthChildOfSelectorPerParent() {
+		// counting restarts for each parent
+		Document doc = Jsoup.parse(
+			"<div id=p1><b id=a1></b><i></i><b id=a2></b><b id=a3></b></div>" +
+			"<div id=p2><b id=b1></b><b id=b2></b></div>");
+
+		assertEquals("a1,b1", ids(doc, ":nth-child(1 of b)"));
+		assertEquals("a3,b2", ids(doc, ":nth-last-child(1 of b)"));
+		assertEquals("a2,b2", ids(doc, "div>:nth-child(2 of b)"));
+	}
+
+	private static String ids(Document doc, String css) {
+		return String.join(",", doc.select(css).eachAttr("id"));
+	}
+
+	@Test
 	public void firstOfType() {
 		check(html.select("div:not(#only) :first-of-type"), "1", "1", "1", "1", "1");
 	}

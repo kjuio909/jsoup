@@ -386,7 +386,15 @@ public class QueryParser implements AutoCloseable {
     private static final Pattern NthOffset = Pattern.compile("([+-])?(\\d+)");
 
     private Evaluator cssNthChild(boolean last, boolean ofType) {
-        String arg = normalize(consumeParens()); // arg is like "odd", or "-n+2", within nth-child(odd)
+        String raw = consumeParens(); // arg is like "odd", or "-n+2", within nth-child(odd), optionally followed by " of S"
+        final int ofIdx = indexOfOfClause(raw);
+        final String arg = normalize(ofIdx >= 0 ? raw.substring(0, ofIdx) : raw);
+        final boolean hasOf = ofIdx >= 0;
+
+        if (hasOf && ofType)
+            throw new Selector.SelectorParseException(
+                "Could not parse query '%s': 'of S' is only supported by :nth-child and :nth-last-child", query);
+
         final int step, offset;
         if ("odd".equals(arg)) {
             step = 2;
@@ -411,9 +419,49 @@ public class QueryParser implements AutoCloseable {
             }
         }
 
+        if (hasOf) {
+            String subQuery = raw.substring(ofIdx + 2).trim(); // skip the "of" keyword
+            Validate.notEmpty(subQuery, ":nth-child(An+B of S) selector S must not be empty");
+            Evaluator selector = parse(subQuery); // a comma-separated complex selector list; validates the full grammar
+            return new Evaluator.IsNthChildOf(step, offset, last, selector);
+        }
+
         return ofType
             ? (last ? new Evaluator.IsNthLastOfType(step, offset) : new Evaluator.IsNthOfType(step, offset))
             : (last ? new Evaluator.IsNthLastChild(step, offset) : new Evaluator.IsNthChild(step, offset));
+    }
+
+    /**
+     Finds the index of the {@code of} keyword separating An+B from the selector list in an
+     {@code :nth-child(An+B of S)} argument. The keyword must be bounded on both sides by whitespace, and is not
+     matched inside quoted strings (so attribute values containing " of " are preserved).
+     @return the index of the 'o' in 'of', or -1 if there is no of clause
+     */
+    private static int indexOfOfClause(String arg) {
+        boolean inSingle = false;
+        boolean inDouble = false;
+        boolean prevEscaped = false;
+        for (int i = 0; i < arg.length(); i++) {
+            char c = arg.charAt(i);
+            if (c == '\\' && i + 1 < arg.length()) {
+                i++; // skip the escaped char
+                prevEscaped = true;
+                continue;
+            }
+            if (!inDouble && c == '\'')
+                inSingle = !inSingle;
+            else if (!inSingle && c == '"')
+                inDouble = !inDouble;
+
+            if (!inSingle && !inDouble && !prevEscaped
+                && i > 0 && StringUtil.isWhitespace(arg.charAt(i - 1))
+                && arg.regionMatches(true, i, "of", 0, 2)
+                && i + 2 < arg.length() && StringUtil.isWhitespace(arg.charAt(i + 2))) {
+                return i;
+            }
+            prevEscaped = false;
+        }
+        return -1;
     }
 
     private String consumeParens() {

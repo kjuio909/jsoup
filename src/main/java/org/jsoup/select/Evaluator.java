@@ -583,8 +583,18 @@ public abstract class Evaluator {
             if (p == null || (p instanceof Document)) return false;
 
             final int pos = calculatePosition(root, element);
-            if (a == 0) return pos == b;
+            return matchesNth(a, b, pos);
+        }
 
+        /**
+         Tests if a 1-based sibling position matches the An+B periodic formula.
+         @param a the step
+         @param b the offset
+         @param pos the 1-based position
+         @return true if it matches
+         */
+        static boolean matchesNth(int a, int b, int pos) {
+            if (a == 0) return pos == b;
             return (pos - b) * a >= 0 && (pos - b) % a == 0;
         }
 
@@ -700,6 +710,72 @@ public abstract class Evaluator {
         @Override
         protected String getPseudoClass() {
             return "nth-last-of-type";
+        }
+    }
+
+    /**
+     * css pseudo class :nth-child(An+B of S) and :nth-last-child(An+B of S). Only sibling elements that match the
+     * selector list {@code S} are candidates and counted; the position is computed in document order (or reverse, for
+     * nth-last-child).
+     * @see <a href="https://www.w3.org/TR/selectors-4/#nth-child-pseudo">:nth-child(An+B of S)</a>
+     */
+    public static final class IsNthChildOf extends CssNthEvaluator {
+        private final Evaluator selector;
+        private final boolean last;
+
+        public IsNthChildOf(int step, int offset, boolean last, Evaluator selector) {
+            super(step, offset);
+            this.last = last;
+            this.selector = selector;
+        }
+
+        @Override
+        public boolean matches(Element root, Element element) {
+            final Element p = element.parent();
+            if (p == null || (p instanceof Document)) return false;
+            if (!selector.matches(root, element)) return false; // candidates must match S
+
+            return matchesNth(a, b, calculatePosition(root, element));
+        }
+
+        @Override
+        protected int calculatePosition(Element root, Element element) {
+            int pos = 0;
+            if (last) {
+                for (Element sib = element; sib != null; sib = sib.nextElementSibling()) {
+                    if (selector.matches(root, sib)) pos++;
+                }
+            } else {
+                final Element p = element.parent();
+                for (Element sib = p.firstElementChild(); sib != null; sib = sib.nextElementSibling()) {
+                    if (selector.matches(root, sib)) pos++;
+                    if (sib == element) break;
+                }
+            }
+            return pos;
+        }
+
+        @Override
+        protected String getPseudoClass() {
+            return last ? "nth-last-child" : "nth-child";
+        }
+
+        @Override protected int cost() {
+            return 5 + selector.cost();
+        }
+
+        @Override protected void reset() {
+            selector.reset();
+            super.reset();
+        }
+
+        @Override
+        public String toString() {
+            String format =
+                (a == 0) ? ":%s(%3$d of %4$s)"     // only offset (b)
+                : (b == 0) ? ":%s(%2$dn of %4$s)"  // only step (a)
+                : ":%s(%2$dn%3$+d of %4$s)";       // step, offset
+            return String.format(format, getPseudoClass(), a, b, selector);
         }
     }
 
