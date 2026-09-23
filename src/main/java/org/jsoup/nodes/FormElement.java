@@ -4,7 +4,6 @@ import org.jsoup.Connection;
 import org.jsoup.Jsoup;
 import org.jsoup.helper.HttpConnection;
 import org.jsoup.helper.Validate;
-import org.jsoup.internal.SharedConstants;
 import org.jsoup.internal.StringUtil;
 import org.jsoup.parser.Tag;
 import org.jsoup.select.Elements;
@@ -20,9 +19,19 @@ import java.util.List;
  * form to easily be submitted.
  */
 public class FormElement extends Element {
+    // Listed controls whose form= attribute names their owning form, per the HTML spec
+    private static final String[] FormOwnerTags =
+        {"input", "keygen", "object", "select", "textarea"};
+    private static final Evaluator formOwnerControl =
+        Selector.evaluatorOf(StringUtil.join(FormOwnerTags, ", "));
+    // All parser-listed form controls (the five above plus button, fieldset, output), considered for association
+    private static final String[] ListedControlTags =
+        {"button", "fieldset", "input", "keygen", "object", "output", "select", "textarea"};
+    private static final Evaluator listedControl =
+        Selector.evaluatorOf(StringUtil.join(ListedControlTags, ", "));
+
+    // controls linked to this form by the parser; due to parse recovery, they may not be descendants of this form
     private final Elements linkedEls = new Elements();
-    // contains form submittable elements that were linked during the parse (and due to parse rules, may no longer be a child of this form)
-    private static final Evaluator submittable = Selector.evaluatorOf(StringUtil.join(SharedConstants.FormSubmitTags, ", "));
 
     /**
      * Create a new, standalone form element.
@@ -37,18 +46,82 @@ public class FormElement extends Element {
 
     /**
      * Get the list of form control elements associated with this form.
-     * @return form controls associated with this element.
+     * <p>Association follows the HTML form ownership rules and is recomputed on every call, so moving nodes, or
+     * changing a control's {@code form} attribute or a form's {@code id}, is reflected immediately:</p>
+     * <ul>
+     * <li>a listed control ({@code input}, {@code keygen}, {@code object}, {@code select}, {@code textarea}) that has a
+     * {@code form} attribute is owned by the element in the same document whose {@code id} equals that value, but only
+     * when that element is itself a {@code FormElement}; this lets the control sit outside this form, or even inside
+     * another form, as the explicit owner takes precedence over an ancestor form;</li>
+     * <li>a control without a {@code form} attribute is owned by its nearest ancestor {@code FormElement};</li>
+     * <li>a control with no ancestor form that was linked to this form by the parser (for example, an input hoisted out
+     * of a form during table recovery) stays associated with it;</li>
+     * <li>a {@code form} attribute that is empty, names a missing element, or names an element that is not a form,
+     * leaves the control unassociated — there is no fall back to an ancestor form.</li>
+     * </ul>
+     * The returned controls are in document order and de-duplicated.
+     * @return form controls associated with this element
      */
     public Elements elements() {
-        // As elements may have been added or removed from the DOM after parse, prepare a new list that unions them:
-        Elements els = select(submittable); // current form children
-        for (Element linkedEl : linkedEls) {
-            if (linkedEl.ownerDocument() != null && !els.contains(linkedEl)) {
-                els.add(linkedEl); // adds previously linked elements, that weren't previously removed from the DOM
+        Elements associated = new Elements();
+        Document owner = ownerDocument();
+        if (owner == null) {
+            // a detached form: consider its own descendants and any controls linked directly to it
+            Elements candidates = select(listedControl);
+            for (Element linkedEl : linkedEls) {
+                if (linkedEl.ownerDocument() == null && !candidates.contains(linkedEl))
+                    candidates.add(linkedEl);
             }
+            for (Element el : candidates) {
+                if (isAssociatedDetached(el)) associated.add(el);
+            }
+            return associated;
         }
 
-        return els;
+        // A single document-order traversal: document order and de-duplication both come for free.
+        for (Element el : owner.select(listedControl)) {
+            if (isAssociated(el, owner)) associated.add(el);
+        }
+        return associated;
+    }
+
+    /**
+     * Ownership rules for a detached form: a {@code form} attribute cannot resolve to an owner document, so it leaves
+     * the control unowned; otherwise ancestry applies, falling back to a parser-established link.
+     */
+    private boolean isAssociatedDetached(Element el) {
+        if (formOwnerControl.matches(this, el) && el.hasAttr("form")) return false;
+        FormElement ancestor = nearestAncestorForm(el);
+        if (ancestor != null) return ancestor == this;
+        return linkedEls.contains(el);
+    }
+
+    /**
+     * Apply the form ownership rules to decide whether {@code el} belongs to this form.
+     */
+    private boolean isAssociated(Element el, Document doc) {
+        if (formOwnerControl.matches(doc, el) && el.hasAttr("form")) {
+            // an explicit owner overrides ancestry outright; a dangling target means no owner at all
+            String formId = el.attr("form");
+            if (formId.isEmpty()) return false;
+            return doc.getElementById(formId) == this;
+        }
+
+        FormElement ancestor = nearestAncestorForm(el);
+        if (ancestor != null) return ancestor == this;
+
+        // no form attribute and no ancestor: retain the parser-established association, if any
+        return linkedEls.contains(el);
+    }
+
+    /**
+     * Find the nearest {@code FormElement} ancestor of {@code el}, if any.
+     */
+    private static @Nullable FormElement nearestAncestorForm(Element el) {
+        for (Element parent = el.parent(); parent != null && !parent.nameIs("#root"); parent = parent.parent()) {
+            if (parent instanceof FormElement) return (FormElement) parent;
+        }
+        return null;
     }
 
     /**
@@ -74,20 +147,31 @@ public class FormElement extends Element {
      <p>You can then set up other options (like user-agent, timeout, cookies), then execute it.</p>
 
      @return a connection prepared from the values of this form, in the same session as the one used to request it
-     @throws IllegalArgumentException if the form's absolute action URL cannot be determined. Make sure you pass the
-     document's base URI when parsing.
+     @throws IllegalArgumentException if the form's action URL is missing its base URI, or an absolute action URL is
+     present but cannot be resolved. Make sure you pass the document's base URI when parsing.
      */
     public Connection submit() {
-        String action = hasAttr("action") ? absUrl("action") : baseUri();
-        Validate.notEmpty(action, "Could not determine a form action URL for submit. Ensure you set a base URI when parsing.");
+        String action = hasAttr("action") ? requireAbsUrl("action") : requireBaseUri();
         Connection.Method method = attr("method").equalsIgnoreCase("POST") ?
-                Connection.Method.POST : Connection.Method.GET;
+            Connection.Method.POST : Connection.Method.GET;
 
         Document owner = ownerDocument();
         Connection connection = owner != null? owner.connection().newRequest() : Jsoup.newSession();
         return connection.url(action)
-                .data(formData())
-                .method(method);
+            .data(formData())
+            .method(method);
+    }
+
+    private String requireBaseUri() {
+        String baseUri = baseUri();
+        Validate.notEmpty(baseUri, "Could not determine a form action URL for submit. Ensure you set a base URI when parsing.");
+        return baseUri;
+    }
+
+    private String requireAbsUrl(String attrKey) {
+        String action = absUrl(attrKey);
+        Validate.notEmpty(action, String.format("Could not resolve the form's absolute %s URL for submit. Ensure you set a base URI when parsing.", attrKey));
+        return action;
     }
 
     /**
@@ -99,15 +183,16 @@ public class FormElement extends Element {
      <li>controls that are themselves {@code disabled}, or that are inside a {@code disabled} {@code <fieldset>}, are
      skipped — except for controls inside that fieldset's first {@code <legend>}; a nested disabled fieldset is not
      re-enabled by an outer fieldset's legend;</li>
-     <li>a single-selection {@code <select>} submits the first enabled selected option, or, when nothing is selected, the
-     first enabled option; if there is no enabled option, it submits nothing;</li>
-     <li>a {@code multiple} {@code <select>} submits every enabled selected option in order, and nothing if there are
-     none;</li>
-     <li>{@code <option>}s that are disabled, or that are within a disabled {@code <optgroup>}, are not eligible;</li>
-     <li>checkboxes and radio buttons are only included when checked;</li>
-     <li>{@code <input>} elements of type {@code button} and {@code image}, and {@code <button>} elements, are not
-     submitted; other input types (including {@code submit} and {@code reset}) are included as before.</li>
-     </ul>
+     * <li>a single-selection {@code <select>} submits the first enabled selected option only; if every selected option
+     * is disabled it submits nothing (it does not fall back to an unselected option); when nothing is selected, it
+     * submits the first enabled option;</li>
+     * <li>a {@code multiple} {@code <select>} submits every enabled selected option in order, and nothing if there are
+     * none;</li>
+     * <li>{@code <option>}s that are disabled, or that are within a disabled {@code <optgroup>}, are not eligible;</li>
+     * <li>checkboxes and radio buttons are only included when checked;</li>
+     * <li>{@code <input>} elements of type {@code button} and {@code image}, and {@code <button>} elements, are not
+     * submitted; other input types (including {@code submit} and {@code reset}) are included as before.</li>
+     * </ul>
      @return a fresh, independent list of key vals
      */
     public List<Connection.KeyVal> formData() {
@@ -135,7 +220,7 @@ public class FormElement extends Element {
                                 data.add(HttpConnection.KeyVal.create(name, option.val()));
                         }
                     } else {
-                        // single select: only the first enabled selected option counts
+                        // single select: only the first enabled selected option counts; if none are enabled, submit nothing
                         for (Element option : selected) {
                             if (isEnabledOption(option)) {
                                 data.add(HttpConnection.KeyVal.create(name, option.val()));

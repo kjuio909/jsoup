@@ -379,4 +379,169 @@ public class FormElementTest {
         form.selectFirst("input").attr("value", "2");
         assertEquals("a=2", form.formData().get(0).toString());
     }
+
+    @Test void formAttributeAssociatesExternalControl() {
+        String html = "<form id=f1><input name=a></form><input name=b form=f1>";
+        Document doc = Jsoup.parse(html);
+        FormElement f1 = (FormElement) doc.getElementById("f1");
+        assertNames(f1.elements(), "a", "b");
+    }
+
+    @Test void formAttributeWorksForAllListedTags() {
+        String html = "<form id=f1></form>" +
+            "<input name=i form=f1><keygen name=k form=f1><object name=o form=f1></object>" +
+            "<select name=s form=f1><option value=1></select><textarea name=t form=f1>x</textarea>";
+        Document doc = Jsoup.parse(html);
+        FormElement f1 = (FormElement) doc.getElementById("f1");
+        assertNames(f1.elements(), "i", "k", "o", "s", "t");
+    }
+
+    @Test void formAttributeOverridesAncestorForm() {
+        // control sits inside f2 but names f1; the explicit owner wins over the ancestor form
+        String html = "<form id=f1><input name=outer></form>" +
+            "<form id=f2><input name=inner form=f1></form>";
+        Document doc = Jsoup.parse(html);
+        FormElement f1 = (FormElement) doc.getElementById("f1");
+        FormElement f2 = (FormElement) doc.getElementById("f2");
+        assertNames(f1.elements(), "outer", "inner");
+        assertTrue(f2.elements().isEmpty());
+    }
+
+    @Test void danglingFormAttributeIsUnowned() {
+        // a form= that names a missing element, or a non-form element, means no owner at all — no ancestor fallback
+        Document doc = Jsoup.parse("<form id=f1><input name=a></form>" +
+            "<input name=b form=nope><div id=d1></div><input name=c form=d1>");
+        FormElement f1 = (FormElement) doc.getElementById("f1");
+        assertNames(f1.elements(), "a");
+    }
+
+    @Test void emptyFormAttributeIsUnowned() {
+        // form="" is an explicit (but unresolvable) owner: the control is unowned, not adopted by an ancestor
+        Document doc = Jsoup.parse("<form id=f1><input name=a form=''></form>");
+        FormElement f1 = (FormElement) doc.getElementById("f1");
+        assertTrue(f1.elements().isEmpty());
+    }
+
+    @Test void controlWithoutFormAttributeUsesNearestAncestorForm() {
+        // forms cannot nest via the HTML parser, so build a nested structure through the DOM:
+        //   <form id=outer><div><form id=inner></form><input name=x></div></form>
+        Document doc = Jsoup.parse("<form id=outer></form><form id=inner></form>");
+        FormElement outer = (FormElement) doc.getElementById("outer");
+        FormElement inner = (FormElement) doc.getElementById("inner");
+        Element div = outer.appendElement("div");
+        div.appendChild(inner);
+        div.appendElement("input").attr("name", "x"); // sibling of inner, within outer
+
+        assertNames(outer.elements(), "x");
+        assertTrue(inner.elements().isEmpty());
+    }
+
+    @Test void ownershipRecomputedAfterMove() {
+        Document doc = Jsoup.parse("<form id=f1><input name=a></form><form id=f2></form>");
+        FormElement f1 = (FormElement) doc.getElementById("f1");
+        FormElement f2 = (FormElement) doc.getElementById("f2");
+        Element a = doc.selectFirst("input[name=a]");
+        assertNames(f1.elements(), "a");
+        assertTrue(f2.elements().isEmpty());
+
+        f2.appendChild(a);
+        assertTrue(f1.elements().isEmpty());
+        assertNames(f2.elements(), "a");
+    }
+
+    @Test void ownershipRecomputedAfterAttributeChanges() {
+        Document doc = Jsoup.parse("<form id=f1></form><input name=b>");
+        FormElement f1 = (FormElement) doc.getElementById("f1");
+        Element b = doc.selectFirst("input[name=b]");
+        assertTrue(f1.elements().isEmpty());
+
+        b.attr("form", "f1");
+        assertNames(f1.elements(), "b");
+
+        f1.attr("id", "renamed");
+        assertTrue(f1.elements().isEmpty());
+
+        b.attr("form", "renamed");
+        assertNames(f1.elements(), "b");
+    }
+
+    @Test void elementsAreInDocumentOrderAndDeduplicated() {
+        Document doc = Jsoup.parse("<input name=z form=f1><form id=f1><input name=a></form><input name=m form=f1>");
+        FormElement f1 = (FormElement) doc.getElementById("f1");
+        assertNames(f1.elements(), "z", "a", "m");
+        f1.addElement(doc.selectFirst("input[name=a]")); // duplicate parse link must not duplicate
+        assertEquals(3, f1.elements().size());
+    }
+
+    @Test void adoptedParserLinkRetainedUntilExplicitOwnerOrAncestor() {
+        // table recovery hoists the form out, so the inputs are not its descendants, but the parser linked them
+        Document doc = Jsoup.parse("<table><form id=f1 action='/x'>" +
+            "<tr><td><input name=u></td></tr></form></table>");
+        FormElement f1 = (FormElement) doc.getElementById("f1");
+        assertNames(f1.elements(), "u");
+        assertEquals("u", f1.formData().get(0).key());
+
+        // giving that adopted control an explicit owner elsewhere moves it off f1
+        Document d2 = Jsoup.parse("<table><form id=f1><tr><td><input name=u form=f2></td></tr></form></table><form id=f2></form>");
+        FormElement g1 = (FormElement) d2.getElementById("f1");
+        FormElement g2 = (FormElement) d2.getElementById("f2");
+        assertTrue(g1.elements().isEmpty());
+        assertNames(g2.elements(), "u");
+    }
+
+    @Test void externalControlsAreSubmittedWithFiltering() {
+        // disabled, fieldset/legend, checkbox and ordering rules apply equally to form=-owned external controls
+        String html = "<form id=f1></form>" +
+            "<input name=off form=f1 disabled>" +
+            "<input name=chk form=f1 type=checkbox>" +
+            "<fieldset disabled form=f1><input name=a form=f1><legend><input name=b form=f1></legend></fieldset>" +
+            "<input name=ok form=f1 value=1>";
+        Document doc = Jsoup.parse(html);
+        FormElement f1 = (FormElement) doc.getElementById("f1");
+        List<Connection.KeyVal> data = f1.formData();
+        assertEquals(2, data.size());
+        assertEquals("b=", data.get(0).toString()); // external fieldset's first legend is exempt
+        assertEquals("ok=1", data.get(1).toString());
+    }
+
+    @Test void relativeActionWithoutBaseUriThrows() {
+        Document doc = Jsoup.parse("<form action='/search'><input name=q></form>");
+        FormElement form = (FormElement) doc.selectFirst("form");
+        IllegalArgumentException e = assertThrows(IllegalArgumentException.class, form::submit);
+        assertTrue(e.getMessage().contains("Could not resolve the form's absolute action URL"));
+    }
+
+    @Test void submitCarriesFormDataAndMethod() {
+        Document doc = Jsoup.parse("<form action='/search' method=post><input name=q></form>", "http://example.com/");
+        FormElement form = (FormElement) doc.selectFirst("form");
+        doc.selectFirst("input").attr("value", "jsoup");
+        Connection con = form.submit();
+
+        assertEquals(Connection.Method.POST, con.request().method());
+        assertEquals("http://example.com/search", con.request().url().toExternalForm());
+        @SuppressWarnings("unchecked")
+        List<Connection.KeyVal> requestData = (List<Connection.KeyVal>) con.request().data();
+        assertEquals(form.formData().size(), requestData.size());
+        assertEquals("q=jsoup", requestData.get(0).toString());
+    }
+
+    @Test void detachedFormKeepsDescendantAndLinkedControls() {
+        // a form removed from its document still enumerates its descendants and controls linked to it
+        Document doc = Jsoup.parse("<form id=f1><input name=a></form><input name=b>");
+        FormElement f1 = (FormElement) doc.getElementById("f1");
+        Element b = doc.selectFirst("input[name=b]");
+        f1.remove();
+        f1.addElement(b); // linked but still in the original document — must not be counted against a detached form
+
+        assertNames(f1.elements(), "a");
+        assertEquals("a=", f1.formData().get(0).toString());
+    }
+
+    private static void assertNames(Elements els, String... names) {
+        assertEquals(names.length, els.size());
+        for (int i = 0; i < names.length; i++) {
+            assertEquals(names[i], els.get(i).attr("name"),
+                "element " + i + " expected name " + names[i] + " but was " + els.get(i).attr("name"));
+        }
+    }
 }
