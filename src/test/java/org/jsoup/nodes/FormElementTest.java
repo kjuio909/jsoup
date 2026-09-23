@@ -114,6 +114,131 @@ public class FormElementTest {
         assertTrue(threw);
     }
 
+    @Test public void formDataWithSubmitSubmitter() {
+        String html = "<form><input name='q' value='jsoup'>"
+            + "<input type='submit' name='go' value='Go'>"
+            + "<input type='submit' name='other' value='Other'>"
+            + "<input type='submit' value='NoName'></form>";
+        Document doc = Jsoup.parse(html, "http://example.com/");
+        FormElement form = (FormElement) doc.selectFirst("form");
+        Element go = doc.selectFirst("input[name=go]");
+
+        List<Connection.KeyVal> data = form.formData(go, 0, 0);
+        assertEquals(2, data.size());
+        assertEquals("q=jsoup", data.get(0).toString());
+        assertEquals("go=Go", data.get(1).toString());
+        // the other named submit input is not counted; only the submitter is
+
+        Element noName = doc.select("input[type=submit]").get(2);
+        List<Connection.KeyVal> data2 = form.formData(noName, 0, 0);
+        assertEquals(1, data2.size()); // an unnamed submitter contributes nothing
+        assertEquals("q=jsoup", data2.get(0).toString());
+    }
+
+    @Test public void formDataWithButtonSubmitter() {
+        String html = "<form><button name='b' value='1'>Go</button><button>Plain</button>"
+            + "<input name='q' value='v'></form>";
+        Document doc = Jsoup.parse(html, "http://example.com/");
+        FormElement form = (FormElement) doc.selectFirst("form");
+
+        Element named = doc.selectFirst("button[name=b]");
+        List<Connection.KeyVal> data = form.formData(named, 0, 0);
+        assertEquals(2, data.size());
+        assertEquals("b=1", data.get(0).toString()); // contributes at its document position
+        assertEquals("q=v", data.get(1).toString());
+
+        Element plain = doc.select("button").get(1);
+        List<Connection.KeyVal> data2 = form.formData(plain, 0, 0);
+        assertEquals(1, data2.size()); // an unnamed button contributes nothing
+        assertEquals("q=v", data2.get(0).toString());
+    }
+
+    @Test public void formDataWithImageSubmitter() {
+        String html = "<form><input name='q' value='v'>"
+            + "<input type='image' name='pin' src='a.png'>"
+            + "<input type='image' src='b.png'></form>";
+        Document doc = Jsoup.parse(html, "http://example.com/");
+        FormElement form = (FormElement) doc.selectFirst("form");
+
+        Element pin = doc.selectFirst("input[name=pin]");
+        List<Connection.KeyVal> data = form.formData(pin, 10, 20);
+        assertEquals(3, data.size());
+        assertEquals("q=v", data.get(0).toString());
+        assertEquals("pin.x=10", data.get(1).toString());
+        assertEquals("pin.y=20", data.get(2).toString());
+
+        Element unnamed = doc.select("input[type=image]").get(1);
+        List<Connection.KeyVal> data2 = form.formData(unnamed, 3, 4);
+        assertEquals(3, data2.size());
+        assertEquals("x=3", data2.get(1).toString());
+        assertEquals("y=4", data2.get(2).toString());
+    }
+
+    @Test public void formDataSubmitterValidation() {
+        String html = "<form id=f1><input name='q' value='v'><input type='submit' name='s' value='S'></form>"
+            + "<form id=f2><input type='submit' name='s2' value='S2'></form>";
+        Document doc = Jsoup.parse(html, "http://example.com/");
+        FormElement form1 = (FormElement) doc.selectFirst("#f1");
+        String before = doc.html();
+
+        assertThrows(IllegalArgumentException.class, () -> form1.formData(null, 0, 0));
+        assertThrows(IllegalArgumentException.class, () -> form1.formData(doc.selectFirst("input[name=q]"), 0, 0)); // not a submit control
+        assertThrows(IllegalArgumentException.class, () -> form1.formData(doc.selectFirst("#f2 input"), 0, 0)); // not associated with f1
+        assertEquals(before, doc.html()); // failures do not modify the DOM
+    }
+
+    @Test public void submitWithSubmitter() {
+        String html = "<form action='/search' method='post'><input name='q' value='jsoup'>"
+            + "<input type='image' name='pin'></form>";
+        Document doc = Jsoup.parse(html, "http://example.com/");
+        FormElement form = (FormElement) doc.selectFirst("form");
+        Element pin = doc.selectFirst("input[type=image]");
+
+        Connection con = form.submit(pin, 5, 7);
+        assertEquals(Connection.Method.POST, con.request().method());
+        assertEquals("http://example.com/search", con.request().url().toExternalForm());
+
+        List<Connection.KeyVal> expected = form.formData(pin, 5, 7);
+        List<Connection.KeyVal> actual = (List<Connection.KeyVal>) con.request().data();
+        assertEquals(expected.size(), actual.size());
+        for (int i = 0; i < expected.size(); i++) {
+            assertEquals(expected.get(i).key(), actual.get(i).key());
+            assertEquals(expected.get(i).value(), actual.get(i).value());
+        }
+    }
+
+    @Test public void submitWithSubmitterDefaultsToGet() {
+        String html = "<form action='/search'><input type='submit' name='go' value='Go'></form>";
+        Document doc = Jsoup.parse(html, "http://example.com/");
+        FormElement form = (FormElement) doc.selectFirst("form");
+        Connection con = form.submit(doc.selectFirst("input[type=submit]"), 0, 0);
+        assertEquals(Connection.Method.GET, con.request().method());
+        assertEquals("http://example.com/search", con.request().url().toExternalForm());
+    }
+
+    @Test public void submitWithSubmitterNoBaseUri() {
+        String html = "<form><input type='submit' name='s' value='S'></form>";
+        Document doc = Jsoup.parse(html, "");
+        FormElement form = (FormElement) doc.selectFirst("form");
+        Element s = doc.selectFirst("input[type=submit]");
+        assertThrows(IllegalArgumentException.class, () -> form.submit(s, 0, 0));
+    }
+
+    @Test public void detachedFormDataWithSubmitter() {
+        String html = "<form id=f><input name='in' value='1'><input name='out' value='2' form='f'>"
+            + "<input type='submit' name='s' value='S'></form>";
+        Document doc = Jsoup.parse(html, "http://example.com/");
+        FormElement form = (FormElement) doc.selectFirst("form");
+        Element s = doc.selectFirst("input[type=submit]");
+        form.remove(); // detach; without a Document the form= attribute cannot resolve
+
+        List<Connection.KeyVal> data = form.formData(s, 0, 0);
+        assertEquals(2, data.size());
+        assertEquals("in=1", data.get(0).toString());
+        assertEquals("s=S", data.get(1).toString());
+        // 'out' is unassociated: its form= attribute is not resolved on a detached form
+    }
+
     @Test public void formsAddedAfterParseAreFormElements() {
         Document doc = Jsoup.parse("<body />");
         doc.body().html("<form action='http://example.com/search'><input name='q' value='search'>");

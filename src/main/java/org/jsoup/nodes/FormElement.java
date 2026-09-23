@@ -162,6 +162,30 @@ public class FormElement extends Element {
             .method(method);
     }
 
+    /**
+     Prepare to submit this form, as if the given submit control was clicked. As {@link #submit()}, but the form data
+     is collected by {@link #formData(Element, int, int)} with the given submitter and click coordinates.
+
+     @param submitter the submit control that triggered the submission; must be a {@code button} or an
+     {@code input[type=submit|image]} associated with this form (present in {@link #elements()})
+     @param x the x-coordinate of the click, used when the submitter is an {@code input[type=image]}
+     @param y the y-coordinate of the click, used when the submitter is an {@code input[type=image]}
+     @return a connection prepared from the values of this form, in the same session as the one used to request it
+     @throws IllegalArgumentException if the submitter is not a usable submit control associated with this form, or if
+     the form's action URL is missing its base URI, or an absolute action URL is present but cannot be resolved
+     */
+    public Connection submit(Element submitter, int x, int y) {
+        String action = hasAttr("action") ? requireAbsUrl("action") : requireBaseUri();
+        Connection.Method method = attr("method").equalsIgnoreCase("POST") ?
+            Connection.Method.POST : Connection.Method.GET;
+
+        Document owner = ownerDocument();
+        Connection connection = owner != null? owner.connection().newRequest() : Jsoup.newSession();
+        return connection.url(action)
+            .data(formData(submitter, x, y))
+            .method(method);
+    }
+
     private String requireBaseUri() {
         String baseUri = baseUri();
         Validate.notEmpty(baseUri, "Could not determine a form action URL for submit. Ensure you set a base URI when parsing.");
@@ -196,10 +220,55 @@ public class FormElement extends Element {
      @return a fresh, independent list of key vals
      */
     public List<Connection.KeyVal> formData() {
+        return collectFormData(null, 0, 0);
+    }
+
+    /**
+     Get the data that this form submits, as if the given submit control was clicked. Filtering and list semantics
+     follow {@link #formData()}; the returned list is likewise computed fresh on every call and is independent of the
+     DOM.
+     <p>Submit controls are only counted via the {@code submitter} argument: a {@code button} or an
+     {@code input[type=submit]} submitter contributes {@code name=value} only when it has a name; an
+     {@code input[type=image]} submitter contributes {@code name.x=x} and {@code name.y=y} when named, or
+     {@code x=x} and {@code y=y} when not. Other submit controls in the form (including named
+     {@code input[type=submit]} elements, which {@link #formData()} would otherwise include) are not serialized. The
+     submitter's entries appear at its position in document order.</p>
+     @param submitter the submit control that triggered the submission; must be a {@code button} or an
+     {@code input[type=submit|image]} associated with this form (present in {@link #elements()})
+     @param x the x-coordinate of the click, used when the submitter is an {@code input[type=image]}
+     @param y the y-coordinate of the click, used when the submitter is an {@code input[type=image]}
+     @return a fresh, independent list of key vals
+     @throws IllegalArgumentException if the submitter is not a usable submit control associated with this form
+     */
+    public List<Connection.KeyVal> formData(Element submitter, int x, int y) {
+        requireSubmitter(submitter);
+        return collectFormData(submitter, x, y);
+    }
+
+    /**
+     Check that {@code submitter} is a {@code button} or an {@code input[type=submit|image]} associated with this
+     form.
+     */
+    private void requireSubmitter(Element submitter) {
+        Validate.notNull(submitter, "The submitter must be a button or an input of type submit or image, associated with this form.");
+        String type = submitter.attr("type");
+        boolean usable = submitter.nameIs("button") ||
+            submitter.nameIs("input") && (type.equalsIgnoreCase("submit") || type.equalsIgnoreCase("image"));
+        Validate.isTrue(usable, "The submitter must be a button or an input of type submit or image.");
+        Validate.isTrue(elements().contains(submitter), "The submitter must be associated with this form.");
+    }
+
+    private List<Connection.KeyVal> collectFormData(@Nullable Element submitter, int x, int y) {
         ArrayList<Connection.KeyVal> data = new ArrayList<>();
 
         // iterate the form control elements and accumulate their values
         for (Element el: elements()) {
+            if (el == submitter) {
+                // the submitter contributes at its own position in document order, per the submit control rules
+                if (!el.hasAttr("disabled") && !inDisabledFieldset(el))
+                    addSubmitterData(data, el, x, y);
+                continue;
+            }
             if (!el.tag().isFormSubmittable()) continue; // contents are form listable, superset of submitable
             if (el.nameIs("button")) continue; // <button> elements are never serialized by jsoup
             if (el.hasAttr("disabled")) continue; // skip disabled form inputs
@@ -209,6 +278,7 @@ public class FormElement extends Element {
             String type = el.attr("type");
 
             if (type.equalsIgnoreCase("button") || type.equalsIgnoreCase("image")) continue; // browsers don't submit these
+            if (submitter != null && type.equalsIgnoreCase("submit")) continue; // only the submitter's submit control counts
 
             if (el.nameIs("select")) {
                 boolean multiple = el.hasAttr("multiple");
@@ -249,6 +319,22 @@ public class FormElement extends Element {
             }
         }
         return data;
+    }
+
+    /**
+     Add the submitter's own contribution to the form data: a named {@code button} or {@code input[type=submit]}
+     contributes {@code name=value}; an {@code input[type=image]} contributes {@code name.x} / {@code name.y} with the
+     click coordinates, or {@code x} / {@code y} when it has no name.
+     */
+    private static void addSubmitterData(ArrayList<Connection.KeyVal> data, Element submitter, int x, int y) {
+        String name = submitter.attr("name");
+        if (submitter.nameIs("input") && submitter.attr("type").equalsIgnoreCase("image")) {
+            String prefix = name.isEmpty() ? "" : name + ".";
+            data.add(HttpConnection.KeyVal.create(prefix + "x", String.valueOf(x)));
+            data.add(HttpConnection.KeyVal.create(prefix + "y", String.valueOf(y)));
+        } else if (!name.isEmpty()) { // a button or submit input only contributes when named
+            data.add(HttpConnection.KeyVal.create(name, submitter.val()));
+        }
     }
 
     /**
