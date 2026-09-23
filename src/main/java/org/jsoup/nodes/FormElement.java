@@ -91,18 +91,34 @@ public class FormElement extends Element {
     }
 
     /**
-     * Get the data that this form submits. The returned list is a copy of the data, and changes to the contents of the
-     * list will not be reflected in the DOM.
-     * @return a list of key vals
+     Get the data that this form submits. The returned list is computed fresh from the form's associated controls in
+     document order, on every call, and is independent of the DOM: modifying the list does not change the document, and
+     controls sharing a name each contribute their own entry.
+     <p>The controls are filtered following the HTML form submission rules:</p>
+     <ul>
+     <li>controls that are themselves {@code disabled}, or that are inside a {@code disabled} {@code <fieldset>}, are
+     skipped — except for controls inside that fieldset's first {@code <legend>}; a nested disabled fieldset is not
+     re-enabled by an outer fieldset's legend;</li>
+     <li>a single-selection {@code <select>} submits the first enabled selected option, or, when nothing is selected, the
+     first enabled option; if there is no enabled option, it submits nothing;</li>
+     <li>a {@code multiple} {@code <select>} submits every enabled selected option in order, and nothing if there are
+     none;</li>
+     <li>{@code <option>}s that are disabled, or that are within a disabled {@code <optgroup>}, are not eligible;</li>
+     <li>checkboxes and radio buttons are only included when checked;</li>
+     <li>{@code <input>} elements of type {@code button} and {@code image}, and {@code <button>} elements, are not
+     submitted; other input types (including {@code submit} and {@code reset}) are included as before.</li>
+     </ul>
+     @return a fresh, independent list of key vals
      */
     public List<Connection.KeyVal> formData() {
         ArrayList<Connection.KeyVal> data = new ArrayList<>();
 
         // iterate the form control elements and accumulate their values
-        Elements formEls = elements();
-        for (Element el: formEls) {
+        for (Element el: elements()) {
             if (!el.tag().isFormSubmittable()) continue; // contents are form listable, superset of submitable
+            if (el.nameIs("button")) continue; // <button> elements are never serialized by jsoup
             if (el.hasAttr("disabled")) continue; // skip disabled form inputs
+            if (inDisabledFieldset(el)) continue; // skip controls in a disabled fieldset (first legend excepted)
             String name = el.attr("name");
             if (name.length() == 0) continue;
             String type = el.attr("type");
@@ -110,17 +126,33 @@ public class FormElement extends Element {
             if (type.equalsIgnoreCase("button") || type.equalsIgnoreCase("image")) continue; // browsers don't submit these
 
             if (el.nameIs("select")) {
-                Elements options = el.select("option[selected]");
-                boolean set = false;
-                for (Element option: options) {
-                    data.add(HttpConnection.KeyVal.create(name, option.val()));
-                    set = true;
+                boolean multiple = el.hasAttr("multiple");
+                Elements selected = el.select("option[selected]");
+                if (!selected.isEmpty()) {
+                    if (multiple) {
+                        for (Element option : selected) {
+                            if (isEnabledOption(option))
+                                data.add(HttpConnection.KeyVal.create(name, option.val()));
+                        }
+                    } else {
+                        // single select: only the first enabled selected option counts
+                        for (Element option : selected) {
+                            if (isEnabledOption(option)) {
+                                data.add(HttpConnection.KeyVal.create(name, option.val()));
+                                break;
+                            }
+                        }
+                    }
+                } else if (!multiple) {
+                    // nothing marked selected: a single select defaults to its first enabled option
+                    for (Element option : el.select("option")) {
+                        if (isEnabledOption(option)) {
+                            data.add(HttpConnection.KeyVal.create(name, option.val()));
+                            break;
+                        }
+                    }
                 }
-                if (!set) {
-                    Element option = el.selectFirst("option");
-                    if (option != null)
-                        data.add(HttpConnection.KeyVal.create(name, option.val()));
-                }
+                // a multiple select with no enabled selected option submits nothing
             } else if ("checkbox".equalsIgnoreCase(type) || "radio".equalsIgnoreCase(type)) {
                 // only add checkbox or radio if they have the checked attribute
                 if (el.hasAttr("checked")) {
@@ -132,6 +164,47 @@ public class FormElement extends Element {
             }
         }
         return data;
+    }
+
+    /**
+     Check if a control is excluded by a disabled ancestor fieldset. A disabled fieldset disables its descendants,
+     except for those inside its first {@code legend} child's subtree. A nested disabled fieldset stays disabled even
+     when it sits within an outer fieldset's exempt legend.
+     @param el the control to check
+     @return true if the control is within a disabled fieldset without an exempting legend
+     */
+    private static boolean inDisabledFieldset(Element el) {
+        Element child = el;
+        for (Element parent = el.parent(); parent != null && !parent.nameIs("#root"); child = parent, parent = parent.parent()) {
+            if (parent.nameIs("fieldset") && parent.hasAttr("disabled") && !isFirstLegendChild(child, parent))
+                return true;
+            // if exempted by this fieldset's first legend, keep climbing — an outer disabled fieldset may still apply
+        }
+        return false;
+    }
+
+    /**
+     Check if {@code child} is the first {@code legend} child of {@code fieldset}; the subtree of that legend is
+     exempted from the fieldset's disabled state.
+     */
+    private static boolean isFirstLegendChild(Element child, Element fieldset) {
+        if (!child.nameIs("legend")) return false;
+        for (Element fieldsetChild : fieldset.children()) {
+            if (fieldsetChild.nameIs("legend")) return fieldsetChild == child; // first legend encountered in tree order
+        }
+        return false;
+    }
+
+    /**
+     Check if an option is eligible for submission: not itself disabled, and not inside a disabled optgroup.
+     @param option the option to check
+     @return true if the option may be submitted
+     */
+    private static boolean isEnabledOption(Element option) {
+        if (!option.nameIs("option") || option.hasAttr("disabled")) return false;
+        Element parent = option.parent();
+        if (parent != null && parent.nameIs("optgroup") && parent.hasAttr("disabled")) return false;
+        return true;
     }
 
     @Override
