@@ -663,6 +663,77 @@ public class SelectorTest {
         assertSelectedIds(els, "1");
     }
 
+    @Test public void testHasRelativeScope() {
+        // relative selectors in :has are anchored to the tested element; :scope is the explicit form of that anchor
+        Document doc = Jsoup.parse(
+            "<article id=a><h1></h1><h2></h2><p><b></b><i></i></p></article>" +
+            "<article id=z><h1></h1><p></p><b></b><i></i></article>");
+
+        assertSelectedIds(doc.select("article:has(> h1 + h2)"), "a");
+        assertSelectedIds(doc.select("article:has(> b + i)"), "z");
+        assertSelectedIds(doc.select("article:has(p:has(> b + i))"), "a");
+        assertSelectedIds(doc.select("article:has(:scope > p > b + i)"), "a");
+        assertSelectedIds(doc.select("article:has(+ article)"), "a");
+
+        // css escapes in pseudo-class names are equivalent to the unescaped names
+        assertSelectedIds(doc.select("article:h\\61 s(> h1 + h2)"), "a");
+        assertSelectedIds(doc.select("article:h\\61 s(:sc\\6f pe > p > b + i)"), "a");
+
+        // explicit :scope is equivalent to the implicit anchor of a leading combinator
+        assertSelectedIds(doc.select("article:has(:scope > h1 + h2)"), "a");
+        assertSelectedIds(doc.select("article:has(:scope + article)"), "a");
+    }
+
+    @Test public void testHasSiblingChain() {
+        // a branch starting with + or ~ is anchored to the element's following siblings, and the chain continues from there
+        Document doc = Jsoup.parse("<article id=a></article><article id=b><p></p></article><article id=c></article>");
+        assertSelectedIds(doc.select("article:has(+ article > p)"), "a");
+        assertSelectedIds(doc.select("article:has(+ article p)"), "a");
+        assertSelectedIds(doc.select("article:has(~ article)"), "a", "b");
+
+        // mixed branches: each branch is tested against its own candidate set
+        doc = Jsoup.parse("<article id=a><h1></h1></article><article id=b></article><article id=c></article>");
+        assertSelectedIds(doc.select("article:has(> h1, + article)"), "a", "b");
+    }
+
+    @Test public void testHasDoesNotCrossSubtree() {
+        // a branch without a leading + or ~ combinator must not match siblings outside the element's subtree
+        Document doc = Jsoup.parse("<h1></h1><article id=a></article><h2></h2>");
+        assertEquals(0, doc.select("article:has(h1 ~ h2)").size());
+        assertEquals(0, doc.select("article:has(h1 + h2)").size());
+
+        // ... but does match when the chain is contained within the subtree
+        doc = Jsoup.parse("<article id=a><h1></h1><h2></h2></article><article id=b><h1></h1></article>");
+        assertSelectedIds(doc.select("article:has(h1 ~ h2)"), "a");
+    }
+
+    @Test public void testScope() {
+        Document doc = Jsoup.parse("<div id=d><p id=p><span></span></p></div>");
+        Element div = doc.selectFirst("div");
+        assertNotNull(div);
+
+        // :scope matches the context element of the select
+        Elements els = div.select(":scope");
+        assertEquals(1, els.size());
+        assertEquals("d", els.first().id());
+
+        // and anchors combinators the same way a leading combinator does
+        assertEquals(div.select("> p"), div.select(":scope > p"));
+        assertSelectedIds(div.select(":scope > p"), "p");
+        assertEquals(0, div.select(":scope > span").size());
+
+        // nested :has clauses re-anchor :scope to the inner tested element
+        els = doc.select("div:has(p:has(:scope > span))");
+        assertSelectedIds(els, "d");
+    }
+
+    @Test public void testScopeInvalid() {
+        // :scope does not take an argument
+        assertThrows(Selector.SelectorParseException.class, () -> QueryParser.parse(":scope()"));
+        assertThrows(Selector.SelectorParseException.class, () -> QueryParser.parse("div:has(:scope())"));
+        assertThrows(Selector.SelectorParseException.class, () -> QueryParser.parse("div:has(:scope >)"));
+    }
+
     @MultiLocaleTest
     public void testPseudoContains(Locale locale) {
         Locale.setDefault(locale);

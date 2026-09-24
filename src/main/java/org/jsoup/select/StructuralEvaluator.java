@@ -9,6 +9,8 @@ import org.jsoup.nodes.NodeIterator;
 import org.jsoup.nodes.TextNode;
 
 import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
 import java.util.Map;
 import java.util.WeakHashMap;
 
@@ -72,35 +74,69 @@ abstract class StructuralEvaluator extends Evaluator {
         }
     }
 
+    /** The explicit :scope pseudo-class; matches the element the (sub-)query is anchored to. Equivalent to the
+     implicit Root that a leading combinator applies to. */
+    static class Scope extends Evaluator {
+        @Override
+        public boolean matches(Element root, Element element) {
+            return root == element;
+        }
+
+        @Override protected int cost() {
+            return 1;
+        }
+
+        @Override public String toString() {
+            return ":scope";
+        }
+    }
+
     static class Has extends StructuralEvaluator {
         static final SoftPool<NodeIterator<Node>> NodeIterPool =
             new SoftPool<>(() -> new NodeIterator<>(new TextNode(""), Node.class));
         // the element here is just a placeholder so this can be final - gets set in restart()
 
-        private final boolean checkSiblings; // evaluating against siblings (or children)
+        private final List<Evaluator> branches; // the top-level (comma separated) relative selectors
+        private final boolean[] wantsSiblings; // per branch: if anchored to the scope by a leading + or ~ combinator
 
         public Has(Evaluator evaluator) {
             super(evaluator);
-            checkSiblings = evalWantsSiblings(evaluator);
+            // Split the selector group into its top-level branches, so that each can be tested against the correct
+            // candidate set (the scope element's descendants, or its following siblings)
+            if (evaluator instanceof CombiningEvaluator.Or)
+                branches = ((CombiningEvaluator.Or) evaluator).evaluators;
+            else
+                branches = Collections.singletonList(evaluator);
+            wantsSiblings = new boolean[branches.size()];
+            for (int i = 0; i < branches.size(); i++)
+                wantsSiblings[i] = evalWantsSiblings(branches.get(i));
         }
 
         @Override public boolean matches(Element root, Element element) {
-            if (checkSiblings) { // evaluating against siblings
-                for (Element sib = element.firstElementSibling(); sib != null; sib = sib.nextElementSibling()) {
-                    if (sib != element && evaluator.matches(element, sib)) { // don't match against self
-                        return true;
-                    }
-                }
-            }
-            // otherwise we only want to match children (or below), and not the input element. And we want to minimize GCs so reusing the Iterator obj
+            // we want to minimize GCs so reusing the Iterator obj
             NodeIterator<Node> it = NodeIterPool.borrow();
-            it.restart(element);
             try {
-                while (it.hasNext()) {
-                    Node node = it.next();
-                    if (node == element) continue; // don't match self, only descendants
-                    if (evaluator.matches(element, node)) {
-                        return true;
+                for (int i = 0; i < branches.size(); i++) {
+                    Evaluator branch = branches.get(i);
+                    if (wantsSiblings[i]) {
+                        // a leading + or ~ combinator anchors the branch to the element's following siblings (and their
+                        // descendants); only these branches may see outside the element's own subtree
+                        for (Element sib = element.nextElementSibling(); sib != null; sib = sib.nextElementSibling()) {
+                            it.restart(sib);
+                            while (it.hasNext()) {
+                                if (branch.matches(element, it.next()))
+                                    return true;
+                            }
+                        }
+                    } else {
+                        // otherwise we only want to match children (or below), and not the input element
+                        it.restart(element);
+                        while (it.hasNext()) {
+                            Node node = it.next();
+                            if (node == element) continue; // don't match self, only descendants
+                            if (branch.matches(element, node))
+                                return true;
+                        }
                     }
                 }
             } finally {
@@ -114,14 +150,28 @@ abstract class StructuralEvaluator extends Evaluator {
             return false; // unused; :has(::comment)) goes via implicit root combinator
         }
 
-        /* Test if the :has sub-clause wants sibling elements (vs nested elements) - will be a Combining eval */
+        /* Test if a :has branch is anchored to the scope root by a leading + or ~ combinator (a PreviousSibling or
+         ImmediatePreviousSibling directly on the Root / :scope anchor). Only those branches are evaluated against the
+         scope element's siblings; others see its descendants only, so that e.g. :has(h1 ~ h2) cannot match elements
+         outside the scope's subtree. A nested :has() re-anchors to its own scope element, so is not descended into. */
         private static boolean evalWantsSiblings(Evaluator eval) {
+            if (eval instanceof PreviousSibling || eval instanceof ImmediatePreviousSibling) {
+                Evaluator inner = ((StructuralEvaluator) eval).evaluator;
+                if (inner instanceof Root || inner instanceof Scope)
+                    return true;
+            }
             if (eval instanceof CombiningEvaluator) {
-                CombiningEvaluator ce = (CombiningEvaluator) eval;
-                for (Evaluator innerEval : ce.evaluators) {
-                    if (innerEval instanceof PreviousSibling || innerEval instanceof ImmediatePreviousSibling)
+                for (Evaluator inner : ((CombiningEvaluator) eval).evaluators) {
+                    if (evalWantsSiblings(inner))
                         return true;
                 }
+            } else if (eval instanceof ImmediateParentRun) {
+                for (Evaluator inner : ((ImmediateParentRun) eval).evaluators) {
+                    if (evalWantsSiblings(inner))
+                        return true;
+                }
+            } else if (eval instanceof StructuralEvaluator && !(eval instanceof Has)) {
+                return evalWantsSiblings(((StructuralEvaluator) eval).evaluator);
             }
             return false;
         }

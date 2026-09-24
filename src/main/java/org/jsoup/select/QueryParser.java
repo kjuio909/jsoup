@@ -254,6 +254,8 @@ public class QueryParser implements AutoCloseable {
                 return new NodeEvaluator.BlankValue();
             case "root":
                 return new Evaluator.IsRoot();
+            case "scope":
+                return new StructuralEvaluator.Scope();
             case "matchText": {
                 @SuppressWarnings("deprecation") // :matchText remains supported until its scheduled removal.
                 Evaluator.MatchText matchText = new Evaluator.MatchText();
