@@ -120,7 +120,33 @@ public class QueryParser implements AutoCloseable {
                 break;
             }
         }
+        if (left.wantsNodes())
+            promoteNodeMode(left);
         return left;
+    }
+
+    /**
+     If any step of a selector chain tests leaf nodes (e.g. {@code ::comment}), every sibling combinator in that chain
+     must compare the complete sibling node sequence, not just elements. Promotes the chain's {@code +} combinators to
+     node mode. Nested sub-selectors ({@code :has}, {@code :is}, {@code :not}) re-anchor to their own scope, so are not
+     descended into.
+     */
+    private static void promoteNodeMode(Evaluator eval) {
+        if (eval instanceof StructuralEvaluator.ImmediatePreviousSibling)
+            ((StructuralEvaluator.ImmediatePreviousSibling) eval).wantsNodes = true;
+
+        if (eval instanceof CombiningEvaluator) {
+            for (Evaluator inner : ((CombiningEvaluator) eval).evaluators)
+                promoteNodeMode(inner);
+        } else if (eval instanceof ImmediateParentRun) {
+            for (Evaluator inner : ((ImmediateParentRun) eval).evaluators)
+                promoteNodeMode(inner);
+        } else if (eval instanceof StructuralEvaluator
+            && !(eval instanceof StructuralEvaluator.Has)
+            && !(eval instanceof StructuralEvaluator.Is)
+            && !(eval instanceof StructuralEvaluator.Not)) {
+            promoteNodeMode(((StructuralEvaluator) eval).evaluator);
+        }
     }
 
     Evaluator parseSimpleSequence() {

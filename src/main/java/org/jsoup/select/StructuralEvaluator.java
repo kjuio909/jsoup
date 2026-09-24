@@ -7,6 +7,7 @@ import org.jsoup.nodes.LeafNode;
 import org.jsoup.nodes.Node;
 import org.jsoup.nodes.NodeIterator;
 import org.jsoup.nodes.TextNode;
+import org.jspecify.annotations.Nullable;
 
 import java.util.ArrayList;
 import java.util.Collections;
@@ -120,8 +121,11 @@ abstract class StructuralEvaluator extends Evaluator {
                     Evaluator branch = branches.get(i);
                     if (wantsSiblings[i]) {
                         // a leading + or ~ combinator anchors the branch to the element's following siblings (and their
-                        // descendants); only these branches may see outside the element's own subtree
-                        for (Element sib = element.nextElementSibling(); sib != null; sib = sib.nextElementSibling()) {
+                        // descendants); only these branches may see outside the element's own subtree. If the branch
+                        // tests leaf nodes (e.g. ::comment), step through the complete sibling node sequence;
+                        // otherwise only element siblings are considered
+                        boolean nodeSteps = branch.wantsNodes();
+                        for (Node sib = nodeStep(element, nodeSteps); sib != null; sib = nodeStep(sib, nodeSteps)) {
                             it.restart(sib);
                             while (it.hasNext()) {
                                 if (branch.matches(element, it.next()))
@@ -148,6 +152,11 @@ abstract class StructuralEvaluator extends Evaluator {
         @Override
         boolean evaluateMatch(Element root, Node node) {
             return false; // unused; :has(::comment)) goes via implicit root combinator
+        }
+
+        /** The next sibling to test in a sibling-anchored :has branch: every node in node mode, else elements only. */
+        private static @Nullable Node nodeStep(Node node, boolean nodeSteps) {
+            return nodeSteps ? node.nextSibling() : node.nextElementSibling();
         }
 
         /* Test if a :has branch is anchored to the scope root by a leading + or ~ combinator (a PreviousSibling or
