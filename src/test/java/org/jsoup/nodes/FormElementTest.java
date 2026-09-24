@@ -547,6 +547,87 @@ public class FormElementTest {
         assertTrue(f1.elements().isEmpty());
     }
 
+    @Test void formAttributeWorksForButtonFieldsetAndOutput() {
+        // button, fieldset and output resolve a form= owner just like the other listed controls;
+        // the input inside the external fieldset is not adopted (fieldets are not forms)
+        String html = "<form id=f1><input name=a></form>" +
+            "<button type='submit' name='go' value='Go' form=f1>Go</button>" +
+            "<fieldset name='fs' form=f1><input name='inside'></fieldset>" +
+            "<output name='o' for='a' form=f1>x</output>";
+        Document doc = Jsoup.parse(html, "http://example.com/");
+        FormElement f1 = (FormElement) doc.getElementById("f1");
+        assertNames(f1.elements(), "a", "go", "fs", "o");
+    }
+
+    @Test void externalButtonCanSubmit() {
+        // a button outside the form, associated via form=, is a usable submitter
+        String html = "<form id=f1 action='/search' method='post'><input name=q value=v></form>" +
+            "<button type='submit' name='go' value='Go' form=f1>Go</button>";
+        Document doc = Jsoup.parse(html, "http://example.com/");
+        FormElement f1 = (FormElement) doc.getElementById("f1");
+        Element go = doc.selectFirst("button[name=go]");
+        assertTrue(f1.elements().contains(go));
+
+        List<Connection.KeyVal> data = f1.formData(go, 0, 0);
+        assertEquals(2, data.size());
+        assertEquals("q=v", data.get(0).toString());
+        assertEquals("go=Go", data.get(1).toString()); // appears at the button's document position (after q)
+
+        Connection con = f1.submit(go, 0, 0);
+        assertEquals(Connection.Method.POST, con.request().method());
+        assertEquals("http://example.com/search", con.request().url().toExternalForm());
+    }
+
+    @Test void fieldsetAndOutputCarryNoFormData() {
+        // they are listed (present in elements()) but submit no entries
+        String html = "<form id=f1></form>" +
+            "<fieldset name='fs' form=f1></fieldset><output name='o' form=f1>x</output>";
+        Document doc = Jsoup.parse(html, "http://example.com/");
+        FormElement f1 = (FormElement) doc.getElementById("f1");
+        assertEquals(2, f1.elements().size());
+        assertTrue(f1.formData().isEmpty());
+    }
+
+    @Test void formAttributeOnButtonFieldsetOutputOverridesAncestor() {
+        // forms cannot nest via the parser, so build the nested structure through the DOM
+        Document doc = Jsoup.parse("<form id=f1></form><form id=f2></form>");
+        FormElement f1 = (FormElement) doc.getElementById("f1");
+        FormElement f2 = (FormElement) doc.getElementById("f2");
+        Element button = new Element("button").attr("name", "b").attr("form", "f1");
+        Element fieldset = new Element("fieldset").attr("name", "fs").attr("form", "f1");
+        Element output = new Element("output").attr("name", "o").attr("form", "f1");
+        f2.appendChild(button);
+        f2.appendChild(fieldset);
+        f2.appendChild(output);
+
+        assertNames(f1.elements(), "b", "fs", "o");
+        assertTrue(f2.elements().isEmpty());
+    }
+
+    @Test void danglingOrSelfFormAttributeOnButtonFieldsetOutputIsUnowned() {
+        Document doc = Jsoup.parse("<form id=f1></form>" +
+            "<button id=btn name=b form=nope></button>" +      // missing target
+            "<fieldset name=fs form=''></fieldset>" +           // empty target
+            "<output id=out name=o form=out>x</output>" +       // target is the control itself
+            "<button name=self form=btn>x</button>");           // targets a non-form button
+        FormElement f1 = (FormElement) doc.getElementById("f1");
+        assertTrue(f1.elements().isEmpty());
+    }
+
+    @Test void detachedFormIgnoresFormAttributeOnAnyControl() {
+        // a detached form (no Document) collects form-less descendants only; any form= attribute is unresolvable
+        Document doc = Jsoup.parse("<form id=f><input name=in value=1 form=other>" +
+            "<button name=go value=Go form=other></button>" +
+            "<input name=ok value=2></form>");
+        FormElement f = (FormElement) doc.getElementById("f");
+        f.remove();
+
+        assertNames(f.elements(), "ok");
+        List<Connection.KeyVal> data = f.formData();
+        assertEquals(1, data.size());
+        assertEquals("ok=2", data.get(0).toString());
+    }
+
     @Test void controlWithoutFormAttributeUsesNearestAncestorForm() {
         // forms cannot nest via the HTML parser, so build a nested structure through the DOM:
         //   <form id=outer><div><form id=inner></form><input name=x></div></form>
