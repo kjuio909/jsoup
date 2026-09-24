@@ -707,6 +707,85 @@ public class SelectorTest {
         assertSelectedIds(doc.select("article:has(h1 ~ h2)"), "a");
     }
 
+    @Test public void testHasSiblingLeafChain() {
+        // a leading ~ walks the following node siblings, so text / comment leaves are valid matches and can be skipped
+        Document doc = Jsoup.parse("<article id=a></article><p id=gap></p><!--c--><b></b><i></i>");
+        assertSelectedIds(doc.select("article:has(~ ::comment)"), "a");
+        assertSelectedIds(doc.select("article:has(:scope ~ ::comment)"), "a");
+
+        // a leading + compares the immediate following node, so the intervening <p> blocks the comment
+        assertEquals(0, doc.select("article:has(+ ::comment)").size());
+        assertEquals(0, doc.select("article:has(:scope + ::comment)").size());
+
+        // ~ can skip over a gap element to a text leaf; + cannot
+        doc = Jsoup.parse("<article id=a></article><p id=gap></p>txt");
+        assertSelectedIds(doc.select("article:has(~ ::text)"), "a");
+        assertEquals(0, doc.select("article:has(+ ::text)").size());
+
+        // without a gap, the comment is the immediate following node
+        doc = Jsoup.parse("<article id=a></article><!--c--><b></b>");
+        assertSelectedIds(doc.select("article:has(+ ::comment)"), "a");
+    }
+
+    @Test public void testHasSiblingLeafChainSteps() {
+        // once a leaf selector appears in a sibling chain, every + step compares the full node sequence one by one
+        Document doc = Jsoup.parse("<article id=a></article><!--c--><b></b>txt<i></i>");
+        assertSelectedIds(doc.select("article:has(+ ::comment + b)"), "a");
+        assertSelectedIds(doc.select("article:has(+ b + i)"), "a"); // pure element chain ignores the intervening text
+
+        // but this mixed chain requires comment -> b -> i consecutively, with the text between b and i blocking it
+        assertEquals(0, doc.select("article:has(+ ::comment + b + i)").size());
+
+        // pure element chains keep ignoring leaves between elements
+        doc = Jsoup.parse("<article id=a></article><!--x--><b></b>txt<i></i>");
+        assertSelectedIds(doc.select("article:has(+ b + i)"), "a");
+    }
+
+    @Test public void testHasLeafChainInsideSubtree() {
+        // leaf-chain adjacency applies to sibling steps inside the scope's descendants as well
+        Document doc = Jsoup.parse("<article id=a><h1></h1><!--c--></article>");
+        assertSelectedIds(doc.select("article:has(h1 + ::comment)"), "a");
+        assertSelectedIds(doc.select("article:has(h1 ~ ::comment)"), "a");
+
+        // intervening text blocks + but not ~
+        doc = Jsoup.parse("<article id=a><h1></h1>txt<!--c--></article>");
+        assertEquals(0, doc.select("article:has(h1 + ::comment)").size());
+        assertSelectedIds(doc.select("article:has(h1 ~ ::comment)"), "a");
+    }
+
+    @Test public void testHasContainerAndNestedSelfAnchored() {
+        // :is() and :not() establish their own anchor; a sibling combinator inside must not borrow the outer scope's
+        // following siblings
+        Document doc = Jsoup.parse("<article id=a></article><p></p>");
+        assertEquals(0, doc.select("article:has(:is(+ p))").size());
+        assertEquals(0, doc.select("article:has(:not(+ p))").size());
+
+        // a compounded :scope still anchors a leading combinator
+        assertSelectedIds(doc.select("article:has(:scope:not(.x) + p)"), "a");
+
+        // a nested :has() re-anchors to its own tested element; its + never reaches the outer element's siblings
+        doc = Jsoup.parse("<article id=a><div></div><p></p></article>");
+        assertSelectedIds(doc.select("article:has(div:has(+ p))"), "a");
+        doc = Jsoup.parse("<article id=a></article><div><p></p></div>");
+        assertEquals(0, doc.select("article:has(div:has(+ p))").size());
+    }
+
+    @Test public void testHasLeafChainBranchesIndependent() {
+        // each comma-separated branch keeps its own descendant / sibling set and element / node mode
+        Document doc = Jsoup.parse("<article id=a></article><p></p><!--c-->");
+        assertSelectedIds(doc.select("article:has(+ p, ~ ::comment)"), "a");
+        assertSelectedIds(doc.select("article:has(+ ::comment, + p)"), "a");
+    }
+
+    @Test public void testHasInvalidRelativeSelectors() {
+        // empty condition, trailing combinator, and unbalanced parentheses remain parse errors
+        assertThrows(Selector.SelectorParseException.class, () -> QueryParser.parse("a:has()"));
+        assertThrows(Selector.SelectorParseException.class, () -> QueryParser.parse("a:has(+)"));
+        assertThrows(Selector.SelectorParseException.class, () -> QueryParser.parse("a:has(~)"));
+        assertThrows(Selector.SelectorParseException.class, () -> QueryParser.parse("a:has(+ ::comment +)"));
+        assertThrows(Selector.SelectorParseException.class, () -> QueryParser.parse("a:has(b"));
+    }
+
     @Test public void testScope() {
         Document doc = Jsoup.parse("<div id=d><p id=p><span></span></p></div>");
         Element div = doc.selectFirst("div");

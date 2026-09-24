@@ -5,6 +5,9 @@
 ### Improvements
 * Added support for the `:nth-child(An+B of S)` and `:nth-last-child(An+B of S)` CSS selectors, where `S` is a comma-separated selector list. Only sibling elements matching `S` are candidates, and they are counted in document order (or reverse for nth-last-child). For example, `:nth-child(2 of b)` matches the second `b` element among its element siblings. The `of S` form is only supported by `:nth-child` and `:nth-last-child`; an empty `S`, unbalanced parentheses, or a malformed selector list is a parse error.
 
+### Bug Fixes
+* Fixed the boundary semantics of relative selector chains in `:has()` over mixed node siblings. A leading `+` or `~` condition (equivalent to `:scope +` / `:scope ~`) is now evaluated against the scope element's complete following node sequence when the chain contains a leaf selector such as `::comment` or `::text`, so e.g. `article:has(~ ::comment)` matches a comment reached after a gap element while `article:has(+ ::comment)` requires it to be the immediate following node; within such a chain every `+` step compares adjacent nodes one by one (so `+ ::comment + b + i` does not skip an intervening text node), while chains of pure elements continue to ignore text, comment, and data leaves. Conditions without a leading combinator (and `>`, `:is()`, `:not()`, and nested `:has()` containers) remain anchored to their own scope and no longer borrow the outer sibling relation.
+
 ## 1.23.2 (2026-Aug-26)
 
 ### Improvements
