@@ -663,6 +663,51 @@ public class SelectorTest {
         assertSelectedIds(els, "1");
     }
 
+    @Test public void testHasRelativeScope() {
+        Document doc = Jsoup.parse(
+            "<article id=a><h1></h1><h2></h2><p><b></b><i></i></p></article>" +
+            "<article id=z><h1></h1><p></p><b></b><i></i></article>");
+
+        assertSelectedIds(doc.select("article:has(> h1 + h2)"), "a");
+        assertSelectedIds(doc.select("article:has(> b + i)"), "z");
+        assertSelectedIds(doc.select("article:has(p:has(> b + i))"), "a");
+        assertSelectedIds(doc.select("article:has(+ article)"), "a");
+
+        // :scope is an explicit anchor for the element under test, equivalent to a leading combinator
+        assertSelectedIds(doc.select("article:has(:scope > h1 + h2)"), "a");
+        assertSelectedIds(doc.select("article:has(:scope > p > b + i)"), "a");
+        assertSelectedIds(doc.select("article:has(:scope + article)"), "a");
+
+        // CSS escapes in pseudo-class names
+        assertSelectedIds(doc.select("article:h\\61 s(> h1 + h2)"), "a");
+        assertSelectedIds(doc.select("article:has(:sc\\6f pe > p > b + i)"), "a");
+        assertSelectedIds(doc.select("article:has(:sc\\6f pe + article)"), "a");
+    }
+
+    @Test public void testHasDoesNotCrossSubtrees() {
+        // only branches with an explicit leading + or ~ may see siblings of the scoped element
+        Document doc = Jsoup.parse("<h1></h1><article id=a><p></p></article><h2></h2><article id=b></article>");
+        assertSelectedIds(doc.select("article:has(h1 ~ h2)")); // h1, h2 are outside the article
+        assertSelectedIds(doc.select("article:has(h1 ~ h2, + article)")); // neither branch matches
+        assertSelectedIds(doc.select("article:has(p, + article)"), "a"); // descendant branch still matches
+
+        doc = Jsoup.parse("<article id=a><h1></h1><h2></h2></article>");
+        assertSelectedIds(doc.select("article:has(h1 ~ h2)"), "a"); // same relations held within descendants
+    }
+
+    @Test public void testScope() {
+        Document doc = Jsoup.parse("<div id=1><p id=2><span>One</span></p></div>");
+        Element div = doc.expectFirst("div");
+
+        // :scope matches the context (root) element of the evaluation
+        assertSelectedIds(div.select(":scope"), "1");
+        assertSelectedIds(div.select(":scope > p"), "2");
+        assertEquals(div, div.selectFirst(":scope"));
+
+        // a leading combinator implicitly anchors at the scope root
+        assertEquals(div.select(":scope > p"), div.select("> p"));
+    }
+
     @MultiLocaleTest
     public void testPseudoContains(Locale locale) {
         Locale.setDefault(locale);

@@ -182,6 +182,29 @@ public class QueryParserTest {
     }
 
     @Test
+    public void exceptOnHasErrors() {
+        // empty condition
+        assertThrows(SelectorParseException.class, () -> QueryParser.parse("div:has()"));
+        // trailing combinator
+        assertThrows(SelectorParseException.class, () -> QueryParser.parse("div:has(>)"));
+        assertThrows(SelectorParseException.class, () -> QueryParser.parse("div:has(p >)"));
+        assertThrows(SelectorParseException.class, () -> QueryParser.parse("div:has(p,)"));
+        // empty parens after the :scope anchor pseudo-class
+        assertThrows(SelectorParseException.class, () -> QueryParser.parse("div:has(:scope())"));
+        // unbalanced parens
+        assertThrows(SelectorParseException.class, () -> QueryParser.parse("div:has(> p"));
+        assertThrows(SelectorParseException.class, () -> QueryParser.parse("div:has(:scope > p"));
+    }
+
+    @Test
+    public void hasFailureDoesNotMutateDom() {
+        Document doc = Jsoup.parse("<div id=s><p>a</p></div>");
+        String before = doc.toString();
+        assertThrows(SelectorParseException.class, () -> doc.select("div:has(p >)"));
+        assertEquals(before, doc.toString());
+    }
+
+    @Test
     public void exceptOnEmptySelector() {
         SelectorParseException exception = assertThrows(SelectorParseException.class, () -> QueryParser.parse(""));
         assertEquals("String must not be empty", exception.getMessage());

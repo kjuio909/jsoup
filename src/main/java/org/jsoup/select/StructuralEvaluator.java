@@ -7,6 +7,7 @@ import org.jsoup.nodes.LeafNode;
 import org.jsoup.nodes.Node;
 import org.jsoup.nodes.NodeIterator;
 import org.jsoup.nodes.TextNode;
+import org.jspecify.annotations.Nullable;
 
 import java.util.ArrayList;
 import java.util.Map;
@@ -72,22 +73,33 @@ abstract class StructuralEvaluator extends Evaluator {
         }
     }
 
+    /**
+     The {@code :scope} pseudo-class; matches the root (context) element of the current evaluation. Within a
+     {@code :has()} (or a nested {@code :has()}), that is the element the condition is being tested on.
+     */
+    static class Scope extends Root {
+        @Override public String toString() {
+            return ":scope";
+        }
+    }
+
     static class Has extends StructuralEvaluator {
         static final SoftPool<NodeIterator<Node>> NodeIterPool =
             new SoftPool<>(() -> new NodeIterator<>(new TextNode(""), Node.class));
         // the element here is just a placeholder so this can be final - gets set in restart()
 
-        private final boolean checkSiblings; // evaluating against siblings (or children)
+        @Nullable private final Evaluator siblingEval; // branches of the :has() argument that start with an explicit
+        // + or ~ combinator (anchored at the scope root), and so may match siblings of the scoped element
 
         public Has(Evaluator evaluator) {
             super(evaluator);
-            checkSiblings = evalWantsSiblings(evaluator);
+            siblingEval = siblingEvaluator(evaluator);
         }
 
         @Override public boolean matches(Element root, Element element) {
-            if (checkSiblings) { // evaluating against siblings
+            if (siblingEval != null) { // evaluating against siblings
                 for (Element sib = element.firstElementSibling(); sib != null; sib = sib.nextElementSibling()) {
-                    if (sib != element && evaluator.matches(element, sib)) { // don't match against self
+                    if (sib != element && siblingEval.matches(element, sib)) { // don't match against self
                         return true;
                     }
                 }
@@ -114,13 +126,58 @@ abstract class StructuralEvaluator extends Evaluator {
             return false; // unused; :has(::comment)) goes via implicit root combinator
         }
 
-        /* Test if the :has sub-clause wants sibling elements (vs nested elements) - will be a Combining eval */
-        private static boolean evalWantsSiblings(Evaluator eval) {
+        /**
+         Finds the sub-evaluator(s) of a {@code :has()} argument that may match siblings of the scoped element - i.e.
+         each top-level (comma-separated) branch whose selector chain is anchored at the scope root via a sibling
+         combinator (an explicit leading {@code +} or {@code ~}). Only those branches may see outside the scoped
+         element's subtree; other branches are tested against descendants only, so they can't combine relations across
+         subtrees.
+         @return the sibling-matching evaluator, or {@code null} if no branch wants siblings
+         */
+        private static @Nullable Evaluator siblingEvaluator(Evaluator eval) {
+            if (eval instanceof CombiningEvaluator.Or) { // a top-level comma-separated branch list; test each branch
+                ArrayList<Evaluator> sibs = new ArrayList<>();
+                for (Evaluator branch : ((CombiningEvaluator.Or) eval).evaluators) {
+                    if (wantsSiblings(branch))
+                        sibs.add(branch);
+                }
+                if (sibs.isEmpty()) return null;
+                return sibs.size() == 1 ? sibs.get(0) : new CombiningEvaluator.Or(sibs);
+            }
+            return wantsSiblings(eval) ? eval : null;
+        }
+
+        /**
+         Tests if the evaluator contains a sibling combinator whose match chain is anchored at the scope root (the
+         {@code :has()} context element) - meaning the selector starts with an explicit {@code +} or {@code ~}.
+         */
+        private static boolean wantsSiblings(Evaluator eval) {
+            if (eval instanceof ImmediatePreviousSibling || eval instanceof PreviousSibling)
+                return isScopeAnchored(((StructuralEvaluator) eval).evaluator);
+            if (eval instanceof ImmediateParentRun)
+                return wantsSiblings(((ImmediateParentRun) eval).evaluators.get(0));
+            if (eval instanceof Is) // :is() passes the scope root through
+                return wantsSiblings(((Is) eval).evaluator);
             if (eval instanceof CombiningEvaluator) {
-                CombiningEvaluator ce = (CombiningEvaluator) eval;
-                for (Evaluator innerEval : ce.evaluators) {
-                    if (innerEval instanceof PreviousSibling || innerEval instanceof ImmediatePreviousSibling)
-                        return true;
+                for (Evaluator inner : ((CombiningEvaluator) eval).evaluators) {
+                    if (wantsSiblings(inner)) return true;
+                }
+            }
+            return false;
+        }
+
+        /** Tests if the match chain of the evaluator bottoms out at the scope root (Root or :scope). */
+        private static boolean isScopeAnchored(Evaluator eval) {
+            if (eval instanceof Root) // also :scope, which extends Root
+                return true;
+            if (eval instanceof ImmediateParentRun)
+                return isScopeAnchored(((ImmediateParentRun) eval).evaluators.get(0));
+            if (eval instanceof Ancestor || eval instanceof ImmediatePreviousSibling
+                || eval instanceof PreviousSibling || eval instanceof Is)
+                return isScopeAnchored(((StructuralEvaluator) eval).evaluator);
+            if (eval instanceof CombiningEvaluator) {
+                for (Evaluator inner : ((CombiningEvaluator) eval).evaluators) {
+                    if (isScopeAnchored(inner)) return true;
                 }
             }
             return false;

@@ -3,7 +3,11 @@
 ## Unreleased
 
 ### Improvements
+* Added support for the `:scope` CSS pseudo-class, which matches the context element of the evaluation. Within a `:has()` condition, `:scope` anchors the relative selector to the element being tested, so `:has(> p)` and `:has(:scope > p)` are equivalent, as are `:has(+ p)` and `:has(:scope + p)`. Nested `:has()` conditions (including those inside `:is()` and `:not()`) re-anchor `:scope` to the inner element under test.
 * Added support for the `:nth-child(An+B of S)` and `:nth-last-child(An+B of S)` CSS selectors, where `S` is a comma-separated selector list. Only sibling elements matching `S` are candidates, and they are counted in document order (or reverse for nth-last-child). For example, `:nth-child(2 of b)` matches the second `b` element among its element siblings. The `of S` form is only supported by `:nth-child` and `:nth-last-child`; an empty `S`, unbalanced parentheses, or a malformed selector list is a parse error.
+
+### Bug Fixes
+* Fixed `:has()` to only test an element's own siblings when a selector branch starts with an explicit `+` or `~` combinator. Previously, a branch containing an inner sibling combinator (such as `:has(h1 ~ h2)`) could incorrectly match relations spanning the scoped element's own siblings, combining elements across subtrees.
 
 ## 1.23.2 (2026-Aug-26)
 
