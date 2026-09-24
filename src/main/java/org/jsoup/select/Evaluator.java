@@ -11,6 +11,7 @@ import org.jsoup.nodes.TextNode;
 import org.jsoup.nodes.XmlDeclaration;
 import org.jsoup.parser.ParseSettings;
 import org.jsoup.helper.Regex;
+import org.jspecify.annotations.Nullable;
 
 import java.util.List;
 import java.util.function.Predicate;
@@ -567,20 +568,29 @@ public abstract class Evaluator {
         protected final int a;
         /** Offset */
         protected final int b;
+        /** Optional <code>of S</code> selector filter; when present, only siblings matching it are counted. */
+        protected final @Nullable Evaluator filter;
 
         public CssNthEvaluator(int step, int offset) {
+            this(step, offset, null);
+        }
+
+        public CssNthEvaluator(int step, int offset, @Nullable Evaluator filter) {
             this.a = step;
             this.b = offset;
+            this.filter = filter;
         }
 
         public CssNthEvaluator(int offset) {
-            this(0, offset);
+            this(0, offset, null);
         }
 
         @Override
         public boolean matches(Element root, Element element) {
             final Element p = element.parent();
             if (p == null || (p instanceof Document)) return false;
+            if (filter != null && !filter.matches(root, element))
+                return false; // the element itself must be one of the of S siblings
 
             final int pos = calculatePosition(root, element);
             if (a == 0) return pos == b;
@@ -594,7 +604,16 @@ public abstract class Evaluator {
                 (a == 0) ? ":%s(%3$d)"    // only offset (b)
                 : (b == 0) ? ":%s(%2$dn)" // only step (a)
                 : ":%s(%2$dn%3$+d)";      // step, offset
-            return String.format(format, getPseudoClass(), a, b);
+            String s = String.format(format, getPseudoClass(), a, b);
+            if (filter != null) // render the of S clause inside the pseudo's parens: :nth-child(2n+1 of .p)
+                s = s.substring(0, s.length() - 1) + " of " + filter + ")";
+            return s;
+        }
+
+        @Override
+        protected void reset() {
+            if (filter != null) filter.reset();
+            super.reset();
         }
 
         protected abstract String getPseudoClass();
@@ -613,9 +632,25 @@ public abstract class Evaluator {
             super(step, offset);
         }
 
+        public IsNthChild(int step, int offset, @Nullable Evaluator filter) {
+            super(step, offset, filter);
+        }
+
         @Override
         protected int calculatePosition(Element root, Element element) {
-            return element.elementSiblingIndex() + 1;
+            if (filter == null)
+                return element.elementSiblingIndex() + 1;
+
+            // position among the element siblings matching the of S filter, counted from 1
+            Element parent = element.parent();
+            int pos = 0;
+            for (Element sibling = parent.firstElementChild();
+                 sibling != null;
+                 sibling = sibling.nextElementSibling()) {
+                if (filter.matches(root, sibling)) pos++;
+                if (sibling == element) break;
+            }
+            return pos;
         }
 
         @Override
@@ -634,10 +669,25 @@ public abstract class Evaluator {
             super(step, offset);
         }
 
+        public IsNthLastChild(int step, int offset, @Nullable Evaluator filter) {
+            super(step, offset, filter);
+        }
+
         @Override
         protected int calculatePosition(Element root, Element element) {
-    	    if (element.parent() == null) return 0;
-        	return element.parent().childrenSize() - element.elementSiblingIndex();
+            if (filter == null) {
+                if (element.parent() == null) return 0;
+                return element.parent().childrenSize() - element.elementSiblingIndex();
+            }
+
+            // position among the element siblings matching the of S filter, counted backwards from 1
+            int pos = 0;
+            for (Element sibling = element;
+                 sibling != null;
+                 sibling = sibling.nextElementSibling()) {
+                if (filter.matches(root, sibling)) pos++;
+            }
+            return pos;
         }
 
 		@Override

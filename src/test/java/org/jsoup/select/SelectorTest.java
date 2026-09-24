@@ -1413,6 +1413,120 @@ public class SelectorTest {
         assertSelectedOwnText(neg2, "1", "2");
     }
 
+    @Test void nthChildOfSelector() {
+        // https://www.w3.org/TR/selectors-4/#nth-child-pseudo
+        String html = "<ul>" +
+            "<li id=a class=p>1</li> x " + // whitespace and a text node between, must not be counted
+            "<li id=b>2</li>" +
+            "<li id=c class=p>3</li>" +
+            "</ul>";
+        Document doc = Jsoup.parse(html);
+
+        // the of S filter restricts counting to siblings matching S, numbered from 1
+        assertSelectedIds(doc.select("li:nth-child(2 of .p)"), "c");
+        assertSelectedIds(doc.select("li:nth-last-child(1 of .p)"), "c");
+
+        // without of S, behaves as the regular :nth-child
+        assertSelectedIds(doc.select("li:nth-child(2)"), "b");
+    }
+
+    @Test void nthChildOfSelectorOrdering() {
+        String html = "<div>" +
+            "<span class=s id=a>1</span>" +
+            "<span id=b>2</span>" + // does not match S; must not be counted and must not match
+            "<span class=s id=c>3</span>" +
+            "<span class=s id=d>4</span>" +
+            "</div>";
+        Document doc = Jsoup.parse(html);
+
+        assertSelectedIds(doc.select("span:nth-child(1 of .s)"), "a");
+        assertSelectedIds(doc.select("span:nth-child(2 of .s)"), "c");
+        assertSelectedIds(doc.select("span:nth-child(odd of .s)"), "a", "d"); // positions 1 and 3
+        assertSelectedIds(doc.select("span:nth-child(even of .s)"), "c");    // position 2
+
+        // counted backwards from 1
+        assertSelectedIds(doc.select("span:nth-last-child(1 of .s)"), "d");
+        assertSelectedIds(doc.select("span:nth-last-child(2 of .s)"), "c");
+        assertSelectedIds(doc.select("span:nth-last-child(-n+2 of .s)"), "c", "d"); // last two of S
+    }
+
+    @Test void nthChildOfSelectorListAndNested() {
+        // S is a selector list, and may itself nest pseudo selectors
+        String html = "<ul>" +
+            "<li id=a class=p>1</li>" +
+            "<li id=b class=q>2</li>" +
+            "<li id=c>3</li>" +
+            "<li id=d class=p>4</li>" +
+            "</ul>";
+        Document doc = Jsoup.parse(html);
+
+        assertSelectedIds(doc.select("li:nth-child(2 of .p, .q)"), "b");
+        assertSelectedIds(doc.select("li:nth-child(3 of :is(.p, .q))"), "d");
+        // nested: even-numbered .p siblings are just #d; outer selects it in both directions
+        assertSelectedIds(doc.select("li:nth-child(1 of li.p:nth-child(even of .p))"), "d");
+        assertSelectedIds(doc.select("li:nth-last-child(1 of li.p:nth-child(even of .p))"), "d");
+
+        // S may use structural pseudo selectors, evaluated against the query root like the rest of the chain
+        Document doc2 = Jsoup.parse(
+            "<ul><li id=a class=p><i class=mark></i></li><li id=b class=p></li><li id=c class=q><i></i></li></ul>");
+        assertSelectedIds(doc2.select("li:nth-child(1 of li:has(.mark))"), "a");
+        assertSelectedIds(doc2.select("li:nth-child(2 of li:has(i))"), "c");
+        assertSelectedIds(doc2.select("li:nth-last-child(1 of li:has(.mark))"), "a");
+    }
+
+    @Test void nthChildOfSelectorEntryPoints() {
+        // all of Element#select, Element#is, and Selector#evaluatorOf behave consistently
+        String html = "<ul><li id=a class=p>1</li><li id=b>2</li><li id=c class=p>3</li></ul>";
+        Document doc = Jsoup.parse(html);
+        Element c = doc.expectFirst("#c");
+
+        assertTrue(c.is("li:nth-child(2 of .p)"));
+        assertTrue(c.is("li:nth-last-child(1 of .p)"));
+        assertFalse(doc.expectFirst("#b").is("li:nth-child(2 of .p)"));
+
+        Evaluator evaluator = Selector.evaluatorOf("li:nth-child(2 of .p)");
+        assertTrue(c.is(evaluator));
+        // the compiled Evaluator is reusable across documents
+        Document other = Jsoup.parse(html);
+        assertSame(other.expectFirst("#c"), other.select(evaluator).first());
+
+        // an orphaned element has no parent and does not match
+        Element orphan = new Element("li").attr("class", "p");
+        assertFalse(orphan.is(":nth-child(1 of .p)"));
+        assertFalse(orphan.is(":nth-last-child(1 of .p)"));
+    }
+
+    @Test void nthChildOfSelectorRejectsInvalidSyntax() {
+        // malformed of / parens / S must throw SelectorParseException, never silently degrade to plain nth-child
+        String[] invalid = {
+            "li:nth-child(2 of)",          // of with no selector
+            "li:nth-child(2 of )",
+            "li:nth-child( of .p)",        // no formula
+            "li:nth-child(of .p)",
+            "li:nth-child(2 of .p",        // unbalanced parens
+            "li:nth-child(2 of ..p)",      // invalid selector S
+            "li:nth-last-child(2 of)",
+            ":nth-of-type(1 of .p)",       // of S is only valid on nth-child / nth-last-child
+            ":nth-last-of-type(1 of .p)"
+        };
+        for (String query : invalid) {
+            assertThrows(Selector.SelectorParseException.class, () -> Selector.evaluatorOf(query), query);
+            assertThrows(Selector.SelectorParseException.class,
+                () -> Jsoup.parse("<ul><li class=p></li></ul>").select(query), query);
+        }
+    }
+
+    @Test void nthChildOfSelectorToString() {
+        assertEquals("li:nth-child(2n+1 of .p)", Selector.evaluatorOf("li:nth-child(odd of .p)").toString());
+        assertEquals("li:nth-last-child(1 of .p)", Selector.evaluatorOf("li:nth-last-child(1 of .p)").toString());
+        assertEquals("li:nth-child(-1n+1 of :is(.p, .q))",
+            Selector.evaluatorOf("li:nth-child(-n+1 of :is(.p, .q))").toString());
+
+        // plain nth-child rendering is unchanged
+        assertEquals("li:nth-child(2n+3)", Selector.evaluatorOf("li:nth-child(2n+3)").toString());
+        assertEquals(":nth-child(2n+1 of .p)", new Evaluator.IsNthChild(2, 1, new Evaluator.Class("p")).toString());
+    }
+
     // Tests that nested structural and combining evaluators get reset
     private static class ResetTracker extends Evaluator {
         boolean resetCalled = false;
