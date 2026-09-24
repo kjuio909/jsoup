@@ -521,6 +521,64 @@ public class FormElementTest {
         assertNames(f1.elements(), "i", "k", "o", "s", "t");
     }
 
+    @Test void formAttributeWorksForButtonFieldsetOutput() {
+        // button, fieldset and output follow the same form ownership rules as the other listed controls
+        String html = "<form id=f1></form>" +
+            "<button name=b form=f1>go</button>" +
+            "<fieldset name=fs form=f1><input name=i></fieldset>" +
+            "<output name=o form=f1>x</output>";
+        Document doc = Jsoup.parse(html);
+        FormElement f1 = (FormElement) doc.getElementById("f1");
+        assertNames(f1.elements(), "b", "fs", "o"); // the fieldset itself, not its unassociated inner input
+
+        // fieldset and output carry no data; button is only a submit control
+        assertTrue(f1.formData().isEmpty());
+    }
+
+    @Test void externalButtonCanSubmit() {
+        // a button outside the form, owned through form=, is a valid submitter for that form
+        String html = "<form id=f1 action='/search'><input name=q value=v></form>"
+            + "<button type='submit' name='go' value='1' form='f1'>Go</button>";
+        Document doc = Jsoup.parse(html, "http://example.com/");
+        FormElement f1 = (FormElement) doc.getElementById("f1");
+        Element go = doc.selectFirst("button");
+
+        List<Connection.KeyVal> data = f1.formData(go, 0, 0);
+        assertEquals(2, data.size());
+        assertEquals("q=v", data.get(0).toString());
+        assertEquals("go=1", data.get(1).toString());
+
+        Connection con = f1.submit(go, 0, 0);
+        assertEquals("http://example.com/search", con.request().url().toExternalForm());
+    }
+
+    @Test void formAttributeOnButtonOverridesAncestorForm() {
+        // a button inside f2 but naming f1 submits f1, and is not associated with f2
+        String html = "<form id=f1><input name=a></form>"
+            + "<form id=f2><button name=b form=f1>go</button></form>";
+        Document doc = Jsoup.parse(html, "http://example.com/");
+        FormElement f1 = (FormElement) doc.getElementById("f1");
+        FormElement f2 = (FormElement) doc.getElementById("f2");
+        assertNames(f1.elements(), "a", "b");
+        assertTrue(f2.elements().isEmpty());
+    }
+
+    @Test void danglingFormAttributeOnButtonFieldsetOutputIsUnowned() {
+        // empty, missing and non-form targets leave button/fieldset/output unowned — no ancestor fallback
+        Document doc = Jsoup.parse("<form id=f1>" +
+            "<button name=b1 form=''></button>" +
+            "<button id=self name=b2 form='self'></button>" +
+            "<fieldset name=fs form=nope></fieldset>" +
+            "<output name=o form=d1></output><div id=d1></div>" +
+            "</form>");
+        FormElement f1 = (FormElement) doc.getElementById("f1");
+        assertTrue(f1.elements().isEmpty());
+
+        // an unowned button cannot be used as the form's submitter
+        Element b1 = doc.selectFirst("button[name=b1]");
+        assertThrows(IllegalArgumentException.class, () -> f1.formData(b1, 0, 0));
+    }
+
     @Test void formAttributeOverridesAncestorForm() {
         // control sits inside f2 but names f1; the explicit owner wins over the ancestor form
         String html = "<form id=f1><input name=outer></form>" +

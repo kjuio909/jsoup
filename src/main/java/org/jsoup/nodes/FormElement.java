@@ -19,12 +19,8 @@ import java.util.List;
  * form to easily be submitted.
  */
 public class FormElement extends Element {
-    // Listed controls whose form= attribute names their owning form, per the HTML spec
-    private static final String[] FormOwnerTags =
-        {"input", "keygen", "object", "select", "textarea"};
-    private static final Evaluator formOwnerControl =
-        Selector.evaluatorOf(StringUtil.join(FormOwnerTags, ", "));
-    // All parser-listed form controls (the five above plus button, fieldset, output), considered for association
+    // Listed controls, per the HTML spec: these are the elements that can be associated with a form, via either a
+    // form= attribute or parser-listed ancestry
     private static final String[] ListedControlTags =
         {"button", "fieldset", "input", "keygen", "object", "output", "select", "textarea"};
     private static final Evaluator listedControl =
@@ -49,10 +45,11 @@ public class FormElement extends Element {
      * <p>Association follows the HTML form ownership rules and is recomputed on every call, so moving nodes, or
      * changing a control's {@code form} attribute or a form's {@code id}, is reflected immediately:</p>
      * <ul>
-     * <li>a listed control ({@code input}, {@code keygen}, {@code object}, {@code select}, {@code textarea}) that has a
-     * {@code form} attribute is owned by the element in the same document whose {@code id} equals that value, but only
-     * when that element is itself a {@code FormElement}; this lets the control sit outside this form, or even inside
-     * another form, as the explicit owner takes precedence over an ancestor form;</li>
+     * <li>a listed control ({@code button}, {@code fieldset}, {@code input}, {@code keygen}, {@code object},
+     * {@code output}, {@code select}, or {@code textarea}) that has a {@code form} attribute is owned by the element
+     * in the same document whose {@code id} equals that value, but only when that element is itself a
+     * {@code FormElement}; this lets the control sit outside this form, or even inside another form, as the explicit
+     * owner takes precedence over an ancestor form;</li>
      * <li>a control without a {@code form} attribute is owned by its nearest ancestor {@code FormElement};</li>
      * <li>a control with no ancestor form that was linked to this form by the parser (for example, an input hoisted out
      * of a form during table recovery) stays associated with it;</li>
@@ -90,7 +87,7 @@ public class FormElement extends Element {
      * the control unowned; otherwise ancestry applies, falling back to a parser-established link.
      */
     private boolean isAssociatedDetached(Element el) {
-        if (formOwnerControl.matches(this, el) && el.hasAttr("form")) return false;
+        if (el.hasAttr("form")) return false; // a form= attribute cannot resolve without an owner document
         FormElement ancestor = nearestAncestorForm(el);
         if (ancestor != null) return ancestor == this;
         return linkedEls.contains(el);
@@ -100,7 +97,7 @@ public class FormElement extends Element {
      * Apply the form ownership rules to decide whether {@code el} belongs to this form.
      */
     private boolean isAssociated(Element el, Document doc) {
-        if (formOwnerControl.matches(doc, el) && el.hasAttr("form")) {
+        if (el.hasAttr("form")) {
             // an explicit owner overrides ancestry outright; a dangling target means no owner at all
             String formId = el.attr("form");
             if (formId.isEmpty()) return false;
