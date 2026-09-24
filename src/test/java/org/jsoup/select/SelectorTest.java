@@ -1800,4 +1800,144 @@ public class SelectorTest {
         assertTrue(threw);
     }
 
+    // https://www.w3.org/TR/selectors-4/#nth-child-pseudo: :nth-child(An+B of S)
+    private static final String NthOfHtml =
+        "<ul><li id=a class=p>1</li><li id=b>2</li><li id=c class=p>3</li></ul>";
+
+    @Test void nthChildOfSpecExamples() {
+        Document doc = Jsoup.parse(NthOfHtml);
+
+        assertSelectedIds(doc.select("li:nth-child(2 of .p)"), "c");
+        assertSelectedIds(doc.select("li:nth-last-child(1 of .p)"), "c");
+        assertSelectedIds(doc.select("li:nth-child(2)"), "b"); // no of: unchanged
+    }
+
+    @Test void nthChildOfStepAndOffset() {
+        Document doc = Jsoup.parse(NthOfHtml);
+
+        // -n+1 matches only the first element in the filtered set
+        assertSelectedIds(doc.select("li:nth-child(-n+1 of .p)"), "a");
+        assertSelectedIds(doc.select("li:nth-last-child(-n+1 of .p)"), "c");
+
+        // odd/even index within the filtered set (.p = #a at 1, #c at 2)
+        assertSelectedIds(doc.select("li:nth-child(odd of .p)"), "a");
+        assertSelectedIds(doc.select("li:nth-child(even of .p)"), "c");
+
+        // integer and An+B steps
+        assertSelectedIds(doc.select("li:nth-child(1 of .p)"), "a");
+        assertSelectedIds(doc.select("li:nth-last-child(2 of .p)"), "a");
+
+        // whitespace tolerant around An+B and of
+        assertSelectedIds(doc.select("li:nth-child( 2n  of  .p )"), "c");
+        assertSelectedIds(doc.select("li:nth-child(2N+1 of .p)"), "a");
+    }
+
+    @Test void nthChildOfSelectorList() {
+        Document doc = Jsoup.parse(NthOfHtml);
+
+        // S is a selector list
+        assertSelectedIds(doc.select("li:nth-child(1 of #a, #c)"), "a");
+        assertSelectedIds(doc.select("li:nth-child(2 of #a, #c)"), "c");
+        assertSelectedIds(doc.select("li:nth-last-child(2 of #a, #c)"), "a");
+    }
+
+    @Test void nthChildOfNestedSelector() {
+        Document doc = Jsoup.parse(
+            "<section><div><p id=p1></p></div><div><p id=p2></p></div><div><span></span></div></section>");
+
+        Elements fwd = doc.select("div:nth-child(2 of div:has(p))");
+        assertEquals(1, fwd.size());
+        assertNotNull(fwd.first().getElementById("p2"));
+
+        Elements rev = doc.select("div:nth-last-child(1 of div:has(p))");
+        assertEquals(1, rev.size());
+        assertNotNull(rev.first().getElementById("p2"));
+    }
+
+    @Test void nthChildOfElementMustMatchS() {
+        Document doc = Jsoup.parse(NthOfHtml);
+
+        // the candidate element itself is not in the S filtered set, so cannot match
+        assertTrue(doc.select("#b:nth-child(1 of .p)").isEmpty());
+
+        // Element#is entry point
+        assertTrue(doc.getElementById("c").is("li:nth-last-child(1 of .p)"));
+        assertFalse(doc.getElementById("a").is("li:nth-child(2 of .p)"));
+
+        // Selector.evaluatorOf entry point
+        Evaluator eval = Selector.evaluatorOf("li:nth-child(2 of .p)");
+        assertTrue(eval.matches(doc, doc.getElementById("c")));
+        assertFalse(eval.matches(doc, doc.getElementById("a")));
+    }
+
+    @Test void nthChildOfIgnoresNonElementNodes() {
+        Document doc = Jsoup.parse("<div>text<p id=x class=q>1</p><!-- c --><p id=y class=q>2</p></div>");
+
+        assertSelectedIds(doc.select("p:nth-child(2 of .q)"), "y");
+        assertSelectedIds(doc.select("p:nth-last-child(1 of .q)"), "y");
+        assertSelectedIds(doc.select("p:nth-last-child(2 of .q)"), "x");
+    }
+
+    @Test void nthChildOfNoParent() {
+        Element orphan = new Element("li").attr("class", "p");
+
+        assertFalse(orphan.is("li:nth-child(1 of .p)"));
+        assertFalse(orphan.is("li:nth-last-child(1 of .p)"));
+    }
+
+    @Test void nthChildOfResetsPerParent() {
+        Document doc = Jsoup.parse(
+            "<ul><li class=p>a1</li></ul><ul><li class=p>b1</li><li class=p>b2</li></ul>");
+
+        Elements firsts = doc.select("li:nth-child(1 of .p)");
+        assertEquals(2, firsts.size());
+        assertEquals("a1", firsts.get(0).text());
+        assertEquals("b1", firsts.get(1).text());
+
+        Elements lasts = doc.select("li:nth-last-child(1 of .p)");
+        assertEquals(2, lasts.size());
+        assertEquals("a1", lasts.get(0).text());
+        assertEquals("b2", lasts.get(1).text());
+    }
+
+    @Test void nthChildOfEvaluatorReuse() {
+        Evaluator eval = Selector.evaluatorOf("li:nth-child(2 of .p)");
+
+        Document doc1 = Jsoup.parse(NthOfHtml);
+        assertSelectedIds(doc1.select(eval), "c");
+
+        // reuse against a second document, and repeatedly against the first
+        Document doc2 = Jsoup.parse("<ul><li class=p>x</li><li class=p>y</li></ul>");
+        assertEquals("y", doc2.select(eval).first().text());
+        assertSelectedIds(doc1.select(eval), "c");
+        assertSelectedIds(doc1.select(eval), "c");
+    }
+
+    @Test void nthChildOfToString() {
+        assertEquals(":nth-child(2 of .p)", Selector.evaluatorOf(":nth-child(2 of .p)").toString());
+        assertEquals(":nth-last-child(-1n+1 of .p)",
+            Selector.evaluatorOf(":nth-last-child(-n+1 of .p)").toString());
+        // tag + pseudo combined
+        assertEquals("li:nth-child(2 of .p)", Selector.evaluatorOf("li:nth-child(2 of .p)").toString());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {
+        "li:nth-child(2 of )",      // empty S
+        "li:nth-child(2 of)",       // of with no selector
+        "li:nth-child(2 of",        // unbalanced parens
+        "li:nth-child(2",           // missing close paren
+        "li:nth-child(x of .p)",    // invalid An+B
+        "li:nth-child(of .p)",      // missing An+B
+        "li:nth-child(2 of ..bad)", // invalid S
+        "li:nth-child(2 of .p",     // missing close paren after S
+        "li:nth-child(2 of .p q))", // extra close paren
+        "li:nth-of-type(2 of li)",  // of S is not valid for nth-of-type
+        "li:nth-last-of-type(2 of li)"
+    })
+    void nthChildOfParseErrors(String query) {
+        // must throw, and never silently degrade to a plain nth-child
+        assertThrows(Selector.SelectorParseException.class, () -> Selector.evaluatorOf(query));
+    }
+
 }

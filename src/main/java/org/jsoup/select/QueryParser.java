@@ -384,14 +384,30 @@ public class QueryParser implements AutoCloseable {
     //pseudo selectors :first-child, :last-child, :nth-child, ...
     private static final Pattern NthStepOffset = Pattern.compile("(([+-])?(\\d+)?)n(\\s*([+-])?\\s*\\d+)?", Pattern.CASE_INSENSITIVE);
     private static final Pattern NthOffset = Pattern.compile("([+-])?(\\d+)");
+    // the optional " of S" clause in :nth-child(An+B of S) etc. Whitespace is required before "of".
+    private static final Pattern NthOfClause = Pattern.compile("\\s+of\\b", Pattern.CASE_INSENSITIVE);
 
     private Evaluator cssNthChild(boolean last, boolean ofType) {
-        String arg = normalize(consumeParens()); // arg is like "odd", or "-n+2", within nth-child(odd)
+        String arg = consumeParens().trim(); // arg is like "odd", "-n+2", or "2n+1 of .p"
+
+        Evaluator ofEvaluator = null;
+        if (!ofType) { // the "of S" clause is only valid for :nth-child() and :nth-last-child()
+            Matcher ofM = NthOfClause.matcher(arg);
+            if (ofM.find()) {
+                String ofArg = arg.substring(ofM.end()).trim();
+                arg = arg.substring(0, ofM.start()).trim();
+                if (ofArg.isEmpty())
+                    throw new Selector.SelectorParseException(
+                        "Could not parse nth-index ':nth-child(%s of ...)': missing of selector", arg);
+                ofEvaluator = parse(ofArg); // S is a selector list; invalid S throws SelectorParseException
+            }
+        }
+
         final int step, offset;
-        if ("odd".equals(arg)) {
+        if ("odd".equalsIgnoreCase(arg)) {
             step = 2;
             offset = 1;
-        } else if ("even".equals(arg)) {
+        } else if ("even".equalsIgnoreCase(arg)) {
             step = 2;
             offset = 0;
         } else {
@@ -411,9 +427,11 @@ public class QueryParser implements AutoCloseable {
             }
         }
 
-        return ofType
-            ? (last ? new Evaluator.IsNthLastOfType(step, offset) : new Evaluator.IsNthOfType(step, offset))
-            : (last ? new Evaluator.IsNthLastChild(step, offset) : new Evaluator.IsNthChild(step, offset));
+        if (ofType)
+            return last ? new Evaluator.IsNthLastOfType(step, offset) : new Evaluator.IsNthOfType(step, offset);
+        return last
+            ? new Evaluator.IsNthLastChild(step, offset, ofEvaluator)
+            : new Evaluator.IsNthChild(step, offset, ofEvaluator);
     }
 
     private String consumeParens() {

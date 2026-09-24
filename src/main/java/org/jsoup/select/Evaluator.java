@@ -11,8 +11,11 @@ import org.jsoup.nodes.TextNode;
 import org.jsoup.nodes.XmlDeclaration;
 import org.jsoup.parser.ParseSettings;
 import org.jsoup.helper.Regex;
+import org.jspecify.annotations.Nullable;
 
 import java.util.List;
+import java.util.Map;
+import java.util.WeakHashMap;
 import java.util.function.Predicate;
 import java.util.regex.Pattern;
 
@@ -567,15 +570,26 @@ public abstract class Evaluator {
         protected final int a;
         /** Offset */
         protected final int b;
+        /** Optional selector list S for the {@code of S} syntax (Selectors Level 4) */
+        final @Nullable Evaluator ofEvaluator;
 
         public CssNthEvaluator(int step, int offset) {
+            this(step, offset, null);
+        }
+
+        public CssNthEvaluator(int step, int offset, @Nullable Evaluator ofEvaluator) {
             this.a = step;
             this.b = offset;
+            this.ofEvaluator = ofEvaluator;
         }
 
         public CssNthEvaluator(int offset) {
-            this(0, offset);
+            this(0, offset, null);
         }
+
+        // Memoize of-evaluator matches, to save repeated re-evaluations of siblings. Keyed by root, then sibling.
+        // ThreadLocal in case the Evaluator is compiled then reused across multiple threads.
+        private final ThreadLocal<Map<Node, Map<Node, Boolean>>> ofMemo = ThreadLocal.withInitial(WeakHashMap::new);
 
         @Override
         public boolean matches(Element root, Element element) {
@@ -583,18 +597,77 @@ public abstract class Evaluator {
             if (p == null || (p instanceof Document)) return false;
 
             final int pos = calculatePosition(root, element);
+            if (pos <= 0) return false; // no position (e.g. fails the of S filter)
             if (a == 0) return pos == b;
 
             return (pos - b) * a >= 0 && (pos - b) % a == 0;
         }
 
+        @Override protected void reset() {
+            ofMemo.remove();
+            if (ofEvaluator != null) ofEvaluator.reset();
+            super.reset();
+        }
+
+        @Override protected int cost() {
+            // with an of S selector, each match walks the siblings and evaluates S against them
+            return ofEvaluator == null ? 5 : 5 + 5 * ofEvaluator.cost();
+        }
+
+        /**
+         Test if an element sibling matches the of S selector (if any).
+         */
+        final boolean ofMatches(Element root, Element sibling) {
+            if (ofEvaluator == null) return true;
+            Map<Node, Map<Node, Boolean>> rootMemo = ofMemo.get();
+            Map<Node, Boolean> memo = rootMemo.computeIfAbsent(root, r -> new WeakHashMap<>());
+            return memo.computeIfAbsent(sibling, test -> ofEvaluator.matches(root, (Element) test));
+        }
+
+        /**
+         Position of the element among its element siblings that match the of S selector. Counting starts at 1, from
+         the first sibling (last == false) or the last sibling (last == true). Returns 0 if the element itself does not
+         match the of S selector (and so has no position in that filtered set).
+         */
+        final int ofPosition(Element root, Element element, boolean last) {
+            int pos = 0;
+            if (last) {
+                for (Element sibling = element.lastElementSibling();
+                     sibling != null;
+                     sibling = sibling.previousElementSibling()) {
+                    if (ofMatches(root, sibling)) {
+                        pos++;
+                        if (sibling == element) return pos;
+                    }
+                }
+            } else {
+                for (Element sibling = element.firstElementSibling();
+                     sibling != null;
+                     sibling = sibling.nextElementSibling()) {
+                    if (ofMatches(root, sibling)) {
+                        pos++;
+                        if (sibling == element) return pos;
+                    }
+                }
+            }
+            return 0; // element itself did not match the of S selector
+        }
+
         @Override
         public String toString() {
-            String format =
-                (a == 0) ? ":%s(%3$d)"    // only offset (b)
-                : (b == 0) ? ":%s(%2$dn)" // only step (a)
-                : ":%s(%2$dn%3$+d)";      // step, offset
-            return String.format(format, getPseudoClass(), a, b);
+            String format;
+            if (ofEvaluator != null) {
+                format =
+                    (a == 0) ? ":%s(%3$d of %4$s)"      // only offset (b)
+                    : (b == 0) ? ":%s(%2$dn of %4$s)"   // only step (a)
+                    : ":%s(%2$dn%3$+d of %4$s)";        // step, offset
+            } else {
+                format =
+                    (a == 0) ? ":%s(%3$d)"    // only offset (b)
+                    : (b == 0) ? ":%s(%2$dn)" // only step (a)
+                    : ":%s(%2$dn%3$+d)";      // step, offset
+            }
+            return String.format(format, getPseudoClass(), a, b, ofEvaluator);
         }
 
         protected abstract String getPseudoClass();
@@ -613,8 +686,14 @@ public abstract class Evaluator {
             super(step, offset);
         }
 
+        public IsNthChild(int step, int offset, @Nullable Evaluator ofEvaluator) {
+            super(step, offset, ofEvaluator);
+        }
+
         @Override
         protected int calculatePosition(Element root, Element element) {
+            if (ofEvaluator != null)
+                return ofPosition(root, element, false);
             return element.elementSiblingIndex() + 1;
         }
 
@@ -634,8 +713,14 @@ public abstract class Evaluator {
             super(step, offset);
         }
 
+        public IsNthLastChild(int step, int offset, @Nullable Evaluator ofEvaluator) {
+            super(step, offset, ofEvaluator);
+        }
+
         @Override
         protected int calculatePosition(Element root, Element element) {
+            if (ofEvaluator != null)
+                return ofPosition(root, element, true);
     	    if (element.parent() == null) return 0;
         	return element.parent().childrenSize() - element.elementSiblingIndex();
         }
