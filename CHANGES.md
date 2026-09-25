@@ -1,5 +1,10 @@
 # jsoup Changelog
 
+## 1.23.3 (pending)
+
+### Improvements
+* The `Cleaner` now safely supports the `srcset` attribute. When `srcset` is allowed by the `Safelist`, its value is parsed into individual candidates: each candidate URL is checked against the protocols configured for the attribute on that tag (and relative URLs are kept only when `preserveRelativeLinks` is enabled), candidates with invalid syntax or descriptors are dropped, and the survivors are emitted in a normalized `url descriptor, url descriptor` form. If no candidates survive, the attribute is removed. Cleaning is idempotent, so re-cleaning the output is stable.
+
 ## 1.23.2 (2026-Aug-26)
 
 ### Improvements

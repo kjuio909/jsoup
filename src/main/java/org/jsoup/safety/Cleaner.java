@@ -198,7 +198,16 @@ public class Cleaner {
                 String key = sourceAttr.getKey();
                 String value = sourceAttr.getValue();
 
-                if (safelist.shouldAbsUrl(sourceTag, key)) { // configured to make absolute urls for this key (href)
+                if (Safelist.isSrcset(key)) { // clean the srcset candidates; drop the attribute if none survive
+                    String cleaned = safelist.cleanSrcset(sourceTag, sourceEl, value);
+                    if (cleaned == null) {
+                        numDiscarded++;
+                        continue;
+                    }
+                    if (!cleaned.equals(value))
+                        numDiscarded++; // candidates were dropped or normalized
+                    value = cleaned;
+                } else if (safelist.shouldAbsUrl(sourceTag, key)) { // configured to make absolute urls for this key (href)
                     value = sourceEl.absUrl(key);
                     if (value.isEmpty()) // could not be made abs; leave as-is to allow custom unknown protocols
                         value = sourceAttr.getValue();

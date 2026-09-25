@@ -701,4 +701,158 @@ public class CleanerTest {
         String input = "<style></t</style><img>";
         assertEquals("<style></t</style>", Jsoup.clean(input, policy));
     }
+
+    @Test void srcsetRemovedWhenNotAllowed() {
+        // status quo: srcset is not in the default safelists, so is removed
+        String h = "<img src='http://example.com/a.jpg' srcset='http://example.com/a.jpg 1x, http://example.com/b.jpg 2x'>";
+        String clean = Jsoup.clean(h, Safelist.basicWithImages());
+        assertEquals("<img src=\"http://example.com/a.jpg\">", clean);
+    }
+
+    @Test void srcsetCleanedPerCandidate() {
+        Safelist safelist = Safelist.basicWithImages()
+            .addAttributes("img", "srcset")
+            .addProtocols("img", "srcset", "http", "https");
+        String h = "<img srcset='http://example.com/a.jpg 1x, https://example.com/b.jpg 2x, javascript:alert(1) 3x, ftp://example.com/c.jpg'>";
+        String clean = Jsoup.clean(h, safelist);
+        assertEquals("<img srcset=\"http://example.com/a.jpg 1x, https://example.com/b.jpg 2x\">", clean);
+    }
+
+    @Test void srcsetProtocolIsCaseInsensitive() {
+        Safelist safelist = Safelist.basicWithImages()
+            .addAttributes("img", "srcset")
+            .addProtocols("img", "srcset", "http", "https");
+        String clean = Jsoup.clean("<img srcset='HTTP://example.com/a.jpg 1x, HTTPS://example.com/b.jpg'>", safelist);
+        assertEquals("<img srcset=\"HTTP://example.com/a.jpg 1x, HTTPS://example.com/b.jpg\">", clean);
+    }
+
+    @Test void srcsetRelativeLinks() {
+        Safelist safelist = Safelist.basicWithImages()
+            .addAttributes("img", "srcset")
+            .addProtocols("img", "srcset", "http", "https")
+            .preserveRelativeLinks(true);
+        String h = "<img srcset='a.jpg 1x, /b.jpg 2x, http://example.com/c.jpg'>";
+        String clean = Jsoup.clean(h, safelist);
+        assertEquals("<img srcset=\"a.jpg 1x, /b.jpg 2x, http://example.com/c.jpg\">", clean);
+
+        // relative candidates are dropped when relative links are not preserved
+        safelist.preserveRelativeLinks(false);
+        clean = Jsoup.clean(h, safelist);
+        assertEquals("<img srcset=\"http://example.com/c.jpg\">", clean);
+    }
+
+    @Test void srcsetDataUrlIsOneCandidate() {
+        Safelist safelist = Safelist.basicWithImages()
+            .addAttributes("img", "srcset")
+            .addProtocols("img", "srcset", "http", "https", "data");
+        String h = "<img srcset='data:image/png;base64,AAAA 1x, https://example.com/b.jpg 2x'>";
+        String clean = Jsoup.clean(h, safelist);
+        assertEquals("<img srcset=\"data:image/png;base64,AAAA 1x, https://example.com/b.jpg 2x\">", clean);
+
+        // without the data: protocol, the whole data candidate is dropped; its parts are not recombined
+        safelist.removeProtocols("img", "srcset", "data");
+        clean = Jsoup.clean(h, safelist);
+        assertEquals("<img srcset=\"https://example.com/b.jpg 2x\">", clean);
+    }
+
+    @Test void srcsetCandidateSplitting() {
+        Safelist safelist = Safelist.basicWithImages()
+            .addAttributes("img", "srcset")
+            .preserveRelativeLinks(true);
+
+        // commas separate candidates, with optional surrounding whitespace
+        assertEquals("<img srcset=\"a.jpg, b.jpg\">", Jsoup.clean("<img srcset='a.jpg, b.jpg'>", safelist));
+        assertEquals("<img srcset=\"a.jpg, b.jpg\">", Jsoup.clean("<img srcset='a.jpg ,b.jpg'>", safelist));
+        assertEquals("<img srcset=\"a.jpg, b.jpg\">", Jsoup.clean("<img srcset='a.jpg , b.jpg'>", safelist));
+
+        // empty candidates from consecutive or trailing separators are dropped
+        assertEquals("<img srcset=\"a.jpg, b.jpg\">", Jsoup.clean("<img srcset='a.jpg, , b.jpg'>", safelist));
+        assertEquals("<img srcset=\"a.jpg, b.jpg\">", Jsoup.clean("<img srcset=',a.jpg,, b.jpg,'>", safelist));
+        assertEquals("<img srcset=\"a.jpg\">", Jsoup.clean("<img srcset='a.jpg,,,'>", safelist));
+
+        // a comma within a URL, directly followed by a non-whitespace character, is part of the URL
+        assertEquals("<img srcset=\"a.jpg,b.jpg\">", Jsoup.clean("<img srcset='a.jpg,b.jpg'>", safelist));
+
+        // whitespace around and within candidates is normalized
+        assertEquals("<img srcset=\"a.jpg 1x, b.jpg 2x\">", Jsoup.clean("<img srcset='  a.jpg   1x , b.jpg  2x  '>", safelist));
+    }
+
+    @Test void srcsetDescriptors() {
+        Safelist safelist = Safelist.basicWithImages()
+            .addAttributes("img", "srcset")
+            .preserveRelativeLinks(true);
+
+        // valid descriptors are kept; no descriptor is fine too
+        assertEquals("<img srcset=\"a.jpg 100w, b.jpg 2x, c.jpg 1.5x, d.jpg 01w, e.jpg\">",
+            Jsoup.clean("<img srcset='a.jpg 100w, b.jpg 2x, c.jpg 1.5x, d.jpg 01w, e.jpg'>", safelist));
+
+        // invalid descriptors drop only their own candidate
+        assertEquals("<img srcset=\"ok.jpg\">", Jsoup.clean(
+            "<img srcset='a.jpg 0w, b.jpg 0x, c.jpg 0.0x, d.jpg +1x, e.jpg -1x, f.jpg 1.x, g.jpg .5x, h.jpg 1e3x, "
+                + "i.jpg 1.5.2x, j.jpg 1X, k.jpg 1W, l.jpg 1x 2x, m.jpg 1x junk, n.jpg w, o.jpg x, ok.jpg'>",
+            safelist));
+
+        // a descriptor must be introduced by an ASCII space, not other whitespace
+        assertEquals("<img srcset=\"b.jpg 1x\">", Jsoup.clean("<img srcset='a.jpg\t1x, b.jpg 1x'>", safelist));
+    }
+
+    @Test void srcsetRemovedWhenNoCandidatesSurvive() {
+        Safelist safelist = Safelist.basicWithImages()
+            .addAttributes("img", "srcset")
+            .addProtocols("img", "srcset", "http", "https");
+        assertEquals("<img>", Jsoup.clean("<img srcset='javascript:alert(1) 1x'>", safelist));
+        assertEquals("<img>", Jsoup.clean("<img srcset='   '>", safelist));
+        assertEquals("<img>", Jsoup.clean("<img srcset=''>", safelist));
+        assertEquals("<img>", Jsoup.clean("<img srcset='a.jpg 0w, ,'>", safelist));
+        assertEquals("<img>", Jsoup.clean("<img srcset=',,,'>", safelist));
+    }
+
+    @Test void srcsetProtocolsArePerTag() {
+        // img allows only https srcset, source allows only http; neither relaxes the other
+        Safelist safelist = Safelist.relaxed()
+            .addAttributes("img", "srcset")
+            .addAttributes("source", "srcset")
+            .addProtocols("img", "srcset", "https")
+            .addProtocols("source", "srcset", "http");
+        String h = "<img srcset='http://example.com/a.jpg, https://example.com/a.jpg'>"
+            + "<source srcset='http://example.com/b.jpg, https://example.com/b.jpg'>";
+        String clean = Jsoup.clean(h, safelist);
+        assertEquals("<img srcset=\"https://example.com/a.jpg\"><source srcset=\"http://example.com/b.jpg\">", clean);
+    }
+
+    @Test void srcsetAllowedViaAllTag() {
+        Safelist safelist = Safelist.basicWithImages()
+            .addAttributes(":all", "srcset")
+            .addProtocols(":all", "srcset", "https");
+        String clean = Jsoup.clean("<img srcset='http://example.com/a.jpg, https://example.com/b.jpg'>", safelist);
+        assertEquals("<img srcset=\"https://example.com/b.jpg\">", clean);
+    }
+
+    @Test void srcsetWithoutProtocolsAllowsAnyUrl() {
+        Safelist safelist = Safelist.basicWithImages()
+            .addAttributes("img", "srcset")
+            .preserveRelativeLinks(true);
+        String clean = Jsoup.clean("<img srcset='a.jpg 1x, custom:thing 2x, data:image/png;base64,AAAA'>", safelist);
+        assertEquals("<img srcset=\"a.jpg 1x, custom:thing 2x, data:image/png;base64,AAAA\">", clean);
+    }
+
+    @Test void srcsetCleanIsIdempotent() {
+        Safelist safelist = Safelist.basicWithImages()
+            .addAttributes("img", "srcset")
+            .addProtocols("img", "srcset", "http", "https")
+            .preserveRelativeLinks(true);
+        String h = "<img src='x.jpg' srcset='  a.jpg   1x , https://example.com/b.jpg  2x, javascript:x, ,data:image/png;base64,AAAA 4x,'>";
+        String once = Jsoup.clean(h, safelist);
+        assertEquals("<img src=\"x.jpg\" srcset=\"a.jpg 1x, https://example.com/b.jpg 2x\">", once);
+        assertEquals(once, Jsoup.clean(once, safelist));
+    }
+
+    @Test void srcsetEscapesOutput() {
+        Safelist safelist = Safelist.basicWithImages()
+            .addAttributes("img", "srcset")
+            .preserveRelativeLinks(true);
+        String clean = Jsoup.clean("<img srcset='a.jpg?x=1&y=2 1x'>", safelist);
+        assertEquals("<img srcset=\"a.jpg?x=1&amp;y=2 1x\">", clean);
+        assertEquals(clean, Jsoup.clean(clean, safelist)); // stable when re-cleaned
+    }
 }

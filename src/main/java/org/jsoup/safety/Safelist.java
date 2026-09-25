@@ -73,6 +73,8 @@ import static org.jsoup.internal.Normalizer.lowerCase;
 public class Safelist {
     private static final String All = ":all";
     private static final TagName AllTag = TagName.valueOf(All);
+    private static final String Srcset = "srcset";
+    private static final AttributeKey SrcsetKey = AttributeKey.valueOf(Srcset);
     private final Set<TagName> tagNames; // tags allowed, lower case. e.g. [p, br, span]
     private final Map<TagName, Set<AttributeKey>> attributes; // tag -> attribute[]. allowed attributes [href] for a tag.
     private final Map<TagName, Map<AttributeKey, AttributeValue>> enforcedAttributes; // always set these attribute values
@@ -522,6 +524,9 @@ public class Safelist {
     /**
      * Test if the supplied attribute is allowed by this safelist for this tag.
      * <p>This method does not modify the input element or attribute.</p>
+     * <p>Note that for {@code srcset} attributes, which hold a comma-separated list of URL candidates, this method
+     * only tests that the attribute itself is allowed; the {@link Cleaner} validates each candidate URL against the
+     * configured protocols when cleaning.</p>
      * @param tagName tag to consider allowing the attribute in
      * @param el element under test, to confirm protocol
      * @param attr attribute under test
@@ -535,8 +540,9 @@ public class Safelist {
         if (okSet != null && okSet.contains(key)) {
             if (protocols.containsKey(tag)) {
                 Map<AttributeKey, Set<Protocol>> attrProts = protocols.get(tag);
-                // ok if not defined protocol; otherwise test
-                return !attrProts.containsKey(key) || isSafeProtocol(getProtocolValue(el, attr), attrProts.get(key));
+                // ok if not defined protocol; otherwise test. srcset URLs are tested per candidate in the Cleaner.
+                return !attrProts.containsKey(key) || isSrcset(attr.getKey())
+                    || isSafeProtocol(getProtocolValue(el, attr), attrProts.get(key));
             } else { // attribute found, no protocols defined, so OK
                 return true;
             }
@@ -578,6 +584,174 @@ public class Safelist {
             }
         }
         return false;
+    }
+
+    /**
+     Tests if the attribute is {@code srcset} (case-insensitive), which holds a comma-separated list of image
+     candidate URLs and so gets per-candidate cleaning in the {@link Cleaner}.
+     */
+    static boolean isSrcset(String attrKey) {
+        return attrKey.equalsIgnoreCase(Srcset);
+    }
+
+    /**
+     Cleans a {@code srcset} attribute value, candidate by candidate. Candidates with invalid syntax (missing URL,
+     empty candidates, malformed descriptors, or trailing junk) are dropped, as are those whose URL fails the
+     protocol checks configured for the attribute on this tag. Surviving candidates keep their original order and
+     are normalized to {@code url descriptor, url descriptor} form. Does not throw on malformed input.
+
+     @param tagName the tag the attribute is on; selects the applicable protocol configuration
+     @param el the element the attribute is on, to resolve URLs against its base URI
+     @param value the source srcset attribute value
+     @return the cleaned value, or {@code null} if no candidates survive (in which case the attribute is removed)
+     */
+    String cleanSrcset(String tagName, Element el, String value) {
+        Set<Protocol> protocols = srcsetProtocols(TagName.valueOf(tagName));
+        StringBuilder sb = StringUtil.borrowBuilder();
+
+        int pos = 0, length = value.length();
+        while (pos <= length) {
+            // find the end of this candidate: a comma separates candidates, unless it is within the URL and directly
+            // followed by a non-whitespace, non-comma character (e.g. the comma in a data: URL). Consecutive
+            // separators produce empty candidates, which are invalid.
+            int start = pos, end = pos;
+            boolean inUrl = true; // still scanning the URL run (no whitespace after URL content yet)
+            boolean started = false; // seen non-whitespace content in this candidate
+            while (end < length) {
+                char c = value.charAt(end);
+                if (c == ',') {
+                    if (inUrl && started && end + 1 < length && !isSrcsetSpace(value.charAt(end + 1)) && value.charAt(end + 1) != ',')
+                        end++; // comma is part of the URL
+                    else
+                        break; // candidate separator
+                } else {
+                    if (isSrcsetSpace(c)) {
+                        if (started) inUrl = false;
+                    } else {
+                        started = true;
+                    }
+                    end++;
+                }
+            }
+            appendSrcsetCandidate(el, value, start, end, protocols, sb);
+            if (end >= length) break;
+            pos = end + 1; // step past the separator comma
+        }
+
+        if (sb.length() == 0) {
+            StringUtil.releaseBuilderVoid(sb);
+            return null;
+        }
+        return StringUtil.releaseBuilder(sb);
+    }
+
+    /**
+     Validates and appends a single srcset candidate (the {@code value} range {@code start}..{@code end}) to
+     {@code sb}. Invalid or unsafe candidates are silently dropped; their text is never recombined into new URLs.
+     */
+    private void appendSrcsetCandidate(Element el, String value, int start, int end, Set<Protocol> protocols, StringBuilder sb) {
+        // trim ASCII whitespace from the candidate
+        while (start < end && isSrcsetSpace(value.charAt(start))) start++;
+        while (end > start && isSrcsetSpace(value.charAt(end - 1))) end--;
+        if (start == end) return; // empty candidate (e.g. from consecutive separators)
+
+        // the URL is the leading run of non-whitespace
+        int urlEnd = start;
+        while (urlEnd < end && !isSrcsetSpace(value.charAt(urlEnd))) urlEnd++;
+        String url = value.substring(start, urlEnd);
+
+        // an optional descriptor may follow, introduced by at least one ASCII space
+        String descriptor = null;
+        if (urlEnd < end) {
+            if (value.charAt(urlEnd) != ' ') return; // the descriptor must be space-separated from the URL
+            int descStart = urlEnd;
+            while (descStart < end && value.charAt(descStart) == ' ') descStart++;
+            int descEnd = descStart;
+            while (descEnd < end && !isSrcsetSpace(value.charAt(descEnd))) descEnd++;
+            if (descEnd != end) return; // unexpected content after the descriptor (e.g. a second descriptor)
+            descriptor = value.substring(descStart, descEnd);
+            if (!isValidSrcsetDescriptor(descriptor)) return;
+        }
+
+        if (protocols != null && !isSafeSrcsetUrl(el, url, protocols)) return;
+
+        if (sb.length() > 0) sb.append(", ");
+        sb.append(url);
+        if (descriptor != null) sb.append(' ').append(descriptor);
+    }
+
+    /**
+     Finds the protocol configuration applicable to {@code srcset} on the given tag, following the same tag to
+     {@code :all} fallback as {@link #isSafeAttribute}, so that per-tag differences neither widen nor narrow each
+     other. Returns {@code null} when URLs are unrestricted.
+     */
+    private Set<Protocol> srcsetProtocols(TagName tag) {
+        Set<AttributeKey> okSet = attributes.get(tag);
+        if (okSet != null && okSet.contains(SrcsetKey)) {
+            Map<AttributeKey, Set<Protocol>> attrProts = protocols.get(tag);
+            return attrProts != null ? attrProts.get(SrcsetKey) : null;
+        }
+        Map<AttributeKey, AttributeValue> enforcedSet = enforcedAttributes.get(tag);
+        if (enforcedSet != null && enforcedSet.containsKey(SrcsetKey)) return null;
+        return !tag.equals(AllTag) ? srcsetProtocols(AllTag) : null;
+    }
+
+    private boolean isSafeSrcsetUrl(Element el, String url, Set<Protocol> protocols) {
+        String value = StringUtil.resolve(el.baseUri(), url);
+        if (value.isEmpty() && !StringUtil.hasHttpScheme(url))
+            value = url; // if it could not be made absolute, run as-is to allow custom unknown protocols
+        return isSafeProtocol(value, protocols);
+    }
+
+    /**
+     Validates a srcset descriptor: a positive integer followed by a lowercase {@code w} (e.g. {@code 100w}), or a
+     positive number (digits, or digits.digits) followed by a lowercase {@code x} (e.g. {@code 2x}, {@code 1.5x}).
+     Signs, exponents, a dot missing a side, and zero values are all invalid.
+     */
+    private static boolean isValidSrcsetDescriptor(String descriptor) {
+        int length = descriptor.length();
+        if (length < 2) return false;
+        String number = descriptor.substring(0, length - 1);
+        switch (descriptor.charAt(length - 1)) {
+            case 'w': return isPositiveInteger(number);
+            case 'x': return isPositiveNumber(number);
+            default:  return false;
+        }
+    }
+
+    /** Tests if the value is all digits and greater than zero. */
+    private static boolean isPositiveInteger(String number) {
+        boolean nonZero = false;
+        for (int i = 0, length = number.length(); i < length; i++) {
+            char c = number.charAt(i);
+            if (c < '0' || c > '9') return false;
+            if (c != '0') nonZero = true;
+        }
+        return nonZero;
+    }
+
+    /** Tests if the value is digits, or digits.digits, and greater than zero. */
+    private static boolean isPositiveNumber(String number) {
+        int dot = number.indexOf('.');
+        if (dot == -1) return isPositiveInteger(number);
+        if (number.indexOf('.', dot + 1) != -1) return false; // at most one dot
+        String integer = number.substring(0, dot);
+        String fraction = number.substring(dot + 1);
+        if (!isDigits(integer) || !isDigits(fraction)) return false; // the dot needs digits on both sides
+        return isPositiveInteger(integer) || isPositiveInteger(fraction);
+    }
+
+    private static boolean isDigits(String value) {
+        for (int i = 0, length = value.length(); i < length; i++) {
+            char c = value.charAt(i);
+            if (c < '0' || c > '9') return false;
+        }
+        return value.length() > 0;
+    }
+
+    /** The ASCII whitespace characters: space, tab, newline, carriage return, and form feed. */
+    private static boolean isSrcsetSpace(char c) {
+        return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f';
     }
 
     /**
