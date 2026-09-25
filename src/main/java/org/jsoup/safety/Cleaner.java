@@ -101,6 +101,40 @@ public class Cleaner {
     }
 
     /**
+     Determines if the input <b>body HTML</b> fragment is valid, against the supplied safelist. It is considered valid
+     if all the tags and attributes in the input HTML are allowed by the safelist; that is, if cleaning the fragment
+     with this safelist would not remove or rewrite any tag, attribute, or attribute value.
+     <p>
+     The fragment is parsed with the same HTML parsing rules used by {@link #clean(Document)}, and tested with the same
+     safety determination, so a fragment that passes this pre-check will not be silently rewritten by a subsequent
+     clean. The check does not modify the input, and does not throw on malformed URLs. URL attributes are tested
+     against the protocols configured for their tag and attribute (protocol names are case-insensitive); relative URLs
+     are only valid when the safelist preserves relative links. The safelist is read directly on every call, so
+     repeated checks of the same fragment return the same result, and configuration changes take effect immediately.
+     </p>
+     <p>
+     This method is intended to be used in a user interface as a validator for user input. Note that regardless of the
+     output of this method, the input <b>must always</b> be normalized using a method such as
+     {@link #clean(Document)}, and the result of that method used to store or serialize the document before later reuse
+     such as presentation to end users. This ensures that enforced attributes are set correctly, and that any
+     differences between how a given browser and how jsoup parses the input HTML are normalized.
+     </p>
+     <p>Example:
+     <pre>{@code
+     Safelist safelist = Safelist.relaxed();
+     boolean isValid = Cleaner.isValid(inputHtml, safelist);
+     String normalizedHtml = Jsoup.clean(inputHtml, safelist);
+     }</pre>
+     </p>
+     @param bodyHtml HTML fragment to test
+     @param safelist safelist to test against
+     @return true if no tags or attributes need to be removed or rewritten; false if they do
+     */
+    public static boolean isValid(String bodyHtml, Safelist safelist) {
+        return new Cleaner(safelist).isValidBodyHtml(bodyHtml);
+    }
+
+    /**
      Determines if the input document's <b>body HTML</b> is valid, against the safelist. It is considered valid if all
      the tags and attributes in the input HTML are allowed by the safelist.
      <p>

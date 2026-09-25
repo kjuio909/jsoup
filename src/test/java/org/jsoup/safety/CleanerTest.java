@@ -230,6 +230,84 @@ public class CleanerTest {
         assertFalse(new Cleaner(Safelist.none()).isValid(okDoc));
     }
 
+    @Test public void testIsValidStringSafelist() {
+        // the static Cleaner.isValid entry point applies the same determination as cleaning
+        String ok = "<p>Test <b><a href='http://example.com/' rel='nofollow'>OK</a></b></p>";
+        String ok1 = "<p>Test <b><a href='http://example.com/'>OK</a></b></p>"; // missing enforced is OK
+        String nok1 = "<p><script></script>Not <b>OK</b></p>";
+        String nok2 = "<p align=right>Test Not <b>OK</b></p>";
+        String nok3 = "<p>Test <b><a href='http://example.com/' rel='nofollowme'>OK</a></b></p>";
+        String nok4 = "<p>Test <b><a href='javascript:alert(1)'>OK</a></b></p>";
+
+        assertTrue(Cleaner.isValid(ok, Safelist.basic()));
+        assertTrue(Cleaner.isValid(ok1, Safelist.basic()));
+        assertFalse(Cleaner.isValid(nok1, Safelist.basic()));
+        assertFalse(Cleaner.isValid(nok2, Safelist.basic()));
+        assertFalse(Cleaner.isValid(nok3, Safelist.basic()));
+        assertFalse(Cleaner.isValid(nok4, Safelist.basic()));
+        assertFalse(Cleaner.isValid(ok, Safelist.none()));
+
+        // agrees with Jsoup.isValid, and repeated checks of the same input are stable
+        Safelist basic = Safelist.basic();
+        assertEquals(Jsoup.isValid(ok, basic), Cleaner.isValid(ok, basic));
+        assertEquals(Cleaner.isValid(ok, basic), Cleaner.isValid(ok, basic));
+    }
+
+    @Test void isValidStringReflectsSafelistChanges() {
+        // configuration changes take effect immediately; no stale results
+        Safelist safelist = Safelist.basic();
+        String html = "<a href='ftp://example.com/'>Link</a>";
+        assertTrue(Cleaner.isValid(html, safelist));
+
+        safelist.removeProtocols("a", "href", "ftp");
+        assertFalse(Cleaner.isValid(html, safelist));
+
+        safelist.addProtocols("a", "href", "ftp");
+        assertTrue(Cleaner.isValid(html, safelist));
+
+        safelist.removeAttributes("a", "href");
+        assertFalse(Cleaner.isValid(html, safelist));
+    }
+
+    @Test void isValidStringRelativeLinks() {
+        // relative forms (path, root-relative, query, fragment, protocol-relative) follow preserveRelativeLinks
+        String html = "<a href='/foo'>One</a> <a href='bar'>Two</a> <a href='?q=1'>Three</a> "
+            + "<a href='//example.com/'>Four</a>";
+        Safelist safelist = Safelist.basic().preserveRelativeLinks(true);
+        assertTrue(Cleaner.isValid(html, safelist));
+
+        safelist.preserveRelativeLinks(false);
+        assertFalse(Cleaner.isValid(html, safelist));
+
+        // preserving relative links does not allow a forbidden absolute protocol
+        Safelist preserve = Safelist.basic().preserveRelativeLinks(true);
+        assertFalse(Cleaner.isValid("<a href='javascript:alert(1)'>Link</a>", preserve));
+        assertFalse(Cleaner.isValid("<a href='unknown:thing'>Link</a>", preserve));
+    }
+
+    @Test void isValidStringProtocolsArePerTag() {
+        // one tag's protocol configuration does not loosen another's
+        Safelist safelist = Safelist.relaxed()
+            .addProtocols("img", "src", "https")
+            .removeProtocols("a", "href", "https");
+        assertFalse(Cleaner.isValid("<a href='https://example.com/'>Link</a>", safelist));
+        assertTrue(Cleaner.isValid("<img src='https://example.com/a.jpg'>", safelist));
+
+        // protocol names are case-insensitive
+        assertTrue(Cleaner.isValid("<img src='HTTPS://example.com/a.jpg'>",
+            Safelist.basicWithImages().preserveRelativeLinks(true)));
+    }
+
+    @Test void isValidStringSrcset() {
+        // srcset keeps its per-candidate behavior through the pre-check
+        Safelist safelist = Safelist.basicWithImages()
+            .addAttributes("img", "srcset")
+            .addProtocols("img", "srcset", "http", "https");
+        assertTrue(Cleaner.isValid("<img srcset='http://example.com/a.jpg 1x, https://example.com/b.jpg 2x'>", safelist));
+        assertFalse(Cleaner.isValid("<img srcset='http://example.com/a.jpg 1x, javascript:alert(1) 2x'>", safelist));
+        assertFalse(Cleaner.isValid("<img srcset='javascript:alert(1) 1x'>", safelist));
+    }
+
     @Test void configuredCleanerMayBeSharedAcrossThreads() throws InterruptedException {
         // https://github.com/jhy/jsoup/issues/2473
         String html = "<a href='/foo'>Link</a><img src='/bar' alt='Q'>";

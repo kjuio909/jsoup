@@ -430,8 +430,9 @@ Connection con3 = session.newRequest();
      @param safelist safelist to test against
      @return true if no tags or attributes were removed; false otherwise
      @see #clean(String, Safelist)
+     @see Cleaner#isValid(String, Safelist)
      */
     public static boolean isValid(String bodyHtml, Safelist safelist) {
-        return new Cleaner(safelist).isValidBodyHtml(bodyHtml);
+        return Cleaner.isValid(bodyHtml, safelist);
     }
 }
