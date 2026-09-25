@@ -67,4 +67,21 @@ public final class NodeInternals {
         if (index != Attributes.NotFound && range.isTracked())
             attributes.ensureSpans().attributeRange(index, range);
     }
+
+    /**
+     Links a form control to a form during parsing, without recording its placement (which is only known once the
+     control is inserted into the tree; see {@link #markFormControlPlacement}).
+     */
+    public static void linkFormControl(FormElement form, Element control) {
+        form.linkElement(control);
+    }
+
+    /**
+     Records the placement of a form control that the parser associated with a form, so that the association of a
+     control placed outside of any form subtree (e.g. foster-parented out of a table) holds only while the control is
+     not moved elsewhere.
+     */
+    public static void markFormControlPlacement(FormElement form, Element control) {
+        form.markOrphanControl(control);
+    }
 }

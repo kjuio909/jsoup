@@ -15,6 +15,12 @@ public final class SharedConstants {
     public static final String RangeSpansKey = "/jsoup.spans";
     public static final String XmlnsAttr = "jsoup.xmlns-";
 
+    /** Internal user-data key: on a control that the parser associated with a form but inserted outside of any form
+     * subtree (e.g. foster-parented out of a table), the parent element it was inserted under. The fallback
+     * association holds only while the control keeps that parent, so moving it after parsing drops the stale link and
+     * lets the current tree and the {@code form} attribute rule. */
+    public static final String FormOrphanParentKey = "/jsoup.formOrphanParent";
+
     public static final int DefaultBufferSize = 8 * 1024;
 
     public static final String[] FormSubmitTags = {
