@@ -10,6 +10,7 @@ import org.jsoup.nodes.Node;
 import org.jsoup.nodes.TextNode;
 import org.jsoup.nodes.XmlDeclaration;
 import org.jsoup.parser.ParseSettings;
+import org.jsoup.parser.TokenQueue;
 import org.jsoup.helper.Regex;
 
 import java.util.List;
@@ -269,9 +270,17 @@ public abstract class Evaluator {
             super(key, value);
         }
 
+        /**
+         * @param caseSensitive if the value comparison should be case-sensitive (vs the default of insensitive)
+         * @since 1.24.1
+         */
+        public AttributeWithValue(String key, String value, boolean caseSensitive) {
+            super(key, value, sense(caseSensitive));
+        }
+
         @Override
         public boolean matches(Element root, Element element) {
-            return element.hasAttr(key) && value.equalsIgnoreCase(element.attr(key));
+            return element.hasAttr(key) && valueMatches(element.attr(key));
         }
 
         @Override protected int cost() {
@@ -286,16 +295,25 @@ public abstract class Evaluator {
     }
 
     /**
-     * Evaluator for attribute name != value matching
+     * Evaluator for attribute name != value matching. This is the complement of {@link AttributeWithValue}: an element
+     * matches unless it has the attribute and its value equals (an element missing the attribute matches).
      */
     public static final class AttributeWithValueNot extends AttributeKeyPair {
         public AttributeWithValueNot(String key, String value) {
             super(key, value);
         }
 
+        /**
+         * @param caseSensitive if the value comparison should be case-sensitive (vs the default of insensitive)
+         * @since 1.24.1
+         */
+        public AttributeWithValueNot(String key, String value, boolean caseSensitive) {
+            super(key, value, sense(caseSensitive));
+        }
+
         @Override
         public boolean matches(Element root, Element element) {
-            return !value.equalsIgnoreCase(element.attr(key));
+            return !(element.hasAttr(key) && valueMatches(element.attr(key)));
         }
 
         @Override protected int cost() {
@@ -317,9 +335,17 @@ public abstract class Evaluator {
             super(key, value);
         }
 
+        /**
+         * @param caseSensitive if the value comparison should be case-sensitive (vs the default of insensitive)
+         * @since 1.24.1
+         */
+        public AttributeWithValueStarting(String key, String value, boolean caseSensitive) {
+            super(key, value, sense(caseSensitive));
+        }
+
         @Override
         public boolean matches(Element root, Element element) {
-            return element.hasAttr(key) && lowerCase(element.attr(key)).startsWith(value); // value is lower case already
+            return element.hasAttr(key) && startsWith(element.attr(key));
         }
 
         @Override protected int cost() {
@@ -340,9 +366,17 @@ public abstract class Evaluator {
             super(key, value);
         }
 
+        /**
+         * @param caseSensitive if the value comparison should be case-sensitive (vs the default of insensitive)
+         * @since 1.24.1
+         */
+        public AttributeWithValueEnding(String key, String value, boolean caseSensitive) {
+            super(key, value, sense(caseSensitive));
+        }
+
         @Override
         public boolean matches(Element root, Element element) {
-            return element.hasAttr(key) && lowerCase(element.attr(key)).endsWith(value); // value is lower case
+            return element.hasAttr(key) && endsWith(element.attr(key));
         }
 
         @Override protected int cost() {
@@ -363,9 +397,17 @@ public abstract class Evaluator {
             super(key, value);
         }
 
+        /**
+         * @param caseSensitive if the value comparison should be case-sensitive (vs the default of insensitive)
+         * @since 1.24.1
+         */
+        public AttributeWithValueContaining(String key, String value, boolean caseSensitive) {
+            super(key, value, sense(caseSensitive));
+        }
+
         @Override
         public boolean matches(Element root, Element element) {
-            return element.hasAttr(key) && lowerCase(element.attr(key)).contains(value); // value is lower case
+            return element.hasAttr(key) && contains(element.attr(key));
         }
 
         @Override protected int cost() {
@@ -415,10 +457,18 @@ public abstract class Evaluator {
      * Abstract evaluator for attribute name/value matching
      */
     public abstract static class AttributeKeyPair extends Evaluator {
+        /** Case sensitivity of an attribute value comparison. */
+        enum Sense { Sensitive, Insensitive }
+
         final String key;
         final String value;
+        final boolean caseSensitive;
 
         public AttributeKeyPair(String key, String value) {
+            this(key, value, Sense.Insensitive);
+        }
+
+        AttributeKeyPair(String key, String value, Sense sense) {
             Validate.notEmpty(key);
             Validate.notNull(value);
 
@@ -427,10 +477,11 @@ public abstract class Evaluator {
                 || value.startsWith("\"") && value.endsWith("\"");
             if (quoted) {
                 Validate.isTrue(value.length() > 1, "Quoted value must have content");
-                value = value.substring(1, value.length() - 1);
+                value = TokenQueue.unescapeCss(value.substring(1, value.length() - 1));
             }
 
-            this.value = lowerCase(value); // case-insensitive match
+            this.caseSensitive = sense == Sense.Sensitive;
+            this.value = caseSensitive ? value : lowerCase(value); // case-insensitive match by default
         }
 
         /**
@@ -442,7 +493,29 @@ public abstract class Evaluator {
             this(key, value);
         }
 
+        static Sense sense(boolean caseSensitive) {
+            return caseSensitive ? Sense.Sensitive : Sense.Insensitive;
+        }
 
+        /** Tests if the element's attribute value equals the expected value, using the configured case sensitivity. */
+        boolean valueMatches(String attrValue) {
+            return caseSensitive ? value.equals(attrValue) : value.equalsIgnoreCase(attrValue);
+        }
+
+        /** Tests if the element's attribute value starts with the expected value, using the configured case sensitivity. */
+        boolean startsWith(String attrValue) {
+            return caseSensitive ? attrValue.startsWith(value) : lowerCase(attrValue).startsWith(value);
+        }
+
+        /** Tests if the element's attribute value ends with the expected value, using the configured case sensitivity. */
+        boolean endsWith(String attrValue) {
+            return caseSensitive ? attrValue.endsWith(value) : lowerCase(attrValue).endsWith(value);
+        }
+
+        /** Tests if the element's attribute value contains the expected value, using the configured case sensitivity. */
+        boolean contains(String attrValue) {
+            return caseSensitive ? attrValue.contains(value) : lowerCase(attrValue).contains(value);
+        }
     }
 
     /**

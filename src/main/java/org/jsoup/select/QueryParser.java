@@ -349,7 +349,8 @@ public class QueryParser implements AutoCloseable {
     }
 
     private Evaluator evaluatorForAttribute(TokenQueue cq) {
-        String key = cq.consumeToAny(AttributeEvals); // eq, not, start, end, contain, match, (no val)
+        cq.consumeWhitespace();
+        String key = consumeAttributeKey(cq);
         key = normalize(key);
         Validate.notEmpty(key);
         Validate.isFalse(key.equals("abs:"), "Absolute attribute key must have a name");
@@ -363,24 +364,112 @@ public class QueryParser implements AutoCloseable {
                 eval = new Evaluator.AttributeStarting("");
             else
                 eval = new Evaluator.Attribute(key);
+        } else if (cq.matchChomp("~=")) { // regex match; the remainder of the queue is the pattern, unmodified
+            eval = new Evaluator.AttributeWithValueMatching(key, Regex.compile(cq.remainder()));
         } else {
-            if (cq.matchChomp('='))
-                eval = new Evaluator.AttributeWithValue(key, cq.remainder());
-            else if (cq.matchChomp("!="))
-                eval = new Evaluator.AttributeWithValueNot(key, cq.remainder());
-            else if (cq.matchChomp("^="))
-                eval = new Evaluator.AttributeWithValueStarting(key, cq.remainder());
-            else if (cq.matchChomp("$="))
-                eval = new Evaluator.AttributeWithValueEnding(key, cq.remainder());
-            else if (cq.matchChomp("*="))
-                eval = new Evaluator.AttributeWithValueContaining(key, cq.remainder());
-            else if (cq.matchChomp("~="))
-                eval = new Evaluator.AttributeWithValueMatching(key, Regex.compile(cq.remainder()));
-            else
-                throw new Selector.SelectorParseException(
-                    "Could not parse attribute query '%s': unexpected token at '%s'", query, cq.remainder());
+            final String op;
+            if (cq.matchChomp("!=")) op = "!=";
+            else if (cq.matchChomp("^=")) op = "^=";
+            else if (cq.matchChomp("$=")) op = "$=";
+            else if (cq.matchChomp("*=")) op = "*=";
+            else if (cq.matchChomp("=")) op = "=";
+            else throw new Selector.SelectorParseException(
+                "Could not parse attribute query '%s': unexpected token at '%s'", query, cq.remainder());
+
+            cq.consumeWhitespace();
+            final String value = consumeAttributeValue(cq);
+            final boolean quoted = !value.isEmpty() && (value.charAt(0) == '"' || value.charAt(0) == '\'');
+            cq.consumeWhitespace();
+
+            // Quoted (CSS string) values compare case-sensitively by default; bare values keep jsoup's historical
+            // case-insensitive compare. An 'i' or 's' modifier after the value overrides the default.
+            boolean caseSensitive = quoted;
+            if (!cq.isEmpty()) {
+                String modifier = cq.consumeCssIdentifier();
+                if (modifier.equalsIgnoreCase("s")) caseSensitive = true;
+                else if (modifier.equalsIgnoreCase("i")) caseSensitive = false;
+                else throw new Selector.SelectorParseException(
+                    "Could not parse attribute query '%s': unexpected token at '%s'", query, modifier + cq.remainder());
+                cq.consumeWhitespace();
+                if (!cq.isEmpty())
+                    throw new Selector.SelectorParseException(
+                        "Could not parse attribute query '%s': unexpected token at '%s'", query, cq.remainder());
+            }
+
+            switch (op) {
+                case "=":
+                    eval = new Evaluator.AttributeWithValue(key, value, caseSensitive);
+                    break;
+                case "!=":
+                    eval = new Evaluator.AttributeWithValueNot(key, value, caseSensitive);
+                    break;
+                case "^=":
+                    eval = new Evaluator.AttributeWithValueStarting(key, value, caseSensitive);
+                    break;
+                case "$=":
+                    eval = new Evaluator.AttributeWithValueEnding(key, value, caseSensitive);
+                    break;
+                case "*=":
+                    eval = new Evaluator.AttributeWithValueContaining(key, value, caseSensitive);
+                    break;
+                default:
+                    throw new Selector.SelectorParseException(
+                        "Could not parse attribute query '%s': unexpected token at '%s'", query, cq.remainder());
+            }
         }
         return eval;
+    }
+
+    /**
+     Consumes an attribute key off the queue, up to (but not including) whitespace or a comparison operator. CSS
+     escapes in the key are decoded.
+     */
+    private String consumeAttributeKey(TokenQueue cq) {
+        StringBuilder sb = StringUtil.borrowBuilder();
+        OUT: while (!cq.isEmpty()) {
+            if (cq.matchesWhitespace()) break;
+            for (String eval : AttributeEvals) {
+                if (cq.matches(eval)) break OUT;
+            }
+            if (cq.matches('\\')) cq.consumeCssEscapeSequence(sb);
+            else sb.append(cq.consume());
+        }
+        return StringUtil.releaseBuilder(sb);
+    }
+
+    /**
+     Consumes an attribute value off the queue: either a quoted string (returned with its quotes, for decoding in the
+     evaluator), or a bare value running to the next whitespace or the end of the queue.
+     */
+    private String consumeAttributeValue(TokenQueue cq) {
+        if (cq.isEmpty()) return "";
+
+        if (cq.matches('"') || cq.matches('\'')) {
+            StringBuilder sb = StringUtil.borrowBuilder();
+            char quote = cq.consume();
+            sb.append(quote);
+            boolean closed = false;
+            while (!cq.isEmpty()) {
+                char c = cq.consume();
+                sb.append(c);
+                if (c == '\\' && !cq.isEmpty()) {
+                    sb.append(cq.consume()); // keep the escaped character with its escape, for balanced decoding
+                } else if (c == quote) {
+                    closed = true;
+                    break;
+                }
+            }
+            if (!closed) {
+                StringUtil.releaseBuilderVoid(sb);
+                throw new Selector.SelectorParseException("Quoted value must have content");
+            }
+            return StringUtil.releaseBuilder(sb);
+        }
+
+        // bare value, up to the next whitespace or the end of the queue
+        StringBuilder sb = StringUtil.borrowBuilder();
+        while (!cq.isEmpty() && !cq.matchesWhitespace()) sb.append(cq.consume());
+        return StringUtil.releaseBuilder(sb);
     }
 
     //pseudo selectors :first-child, :last-child, :nth-child, ...

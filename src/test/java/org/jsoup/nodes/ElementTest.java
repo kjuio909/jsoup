@@ -1936,10 +1936,10 @@ public class ElementTest {
 
         Element p1 = doc.select(".SomeText").first();
         Element p2 = doc.select(".sometext").first();
-        Element p3 = doc.select("[class=SomeText AnotherText]").first();
-        Element p4 = doc.select("[Class=SomeText AnotherText]").first();
-        Element p5 = doc.select("[class=sometext anothertext]").first();
-        Element p6 = doc.select("[class=SomeText AnotherText]").first();
+        Element p3 = doc.select("[class='SomeText AnotherText']").first();
+        Element p4 = doc.select("[Class='SomeText AnotherText']").first();
+        Element p5 = doc.select("[class='sometext anothertext' i]").first();
+        Element p6 = doc.select("[class='SomeText AnotherText' s]").first();
         Element p7 = doc.select("[class^=sometext]").first();
         Element p8 = doc.select("[class$=nothertext]").first();
         Element p9 = doc.select("[class^=sometext]").first();

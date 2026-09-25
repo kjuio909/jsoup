@@ -16,7 +16,9 @@ import java.util.stream.Stream;
  <h2>Selector syntax</h2>
  <p>
  A selector is a chain of simple selectors, separated by combinators. Selectors are <b>case-insensitive</b> (including
- against elements, attributes, and attribute values).
+ against elements, attributes, and attribute values). Quoted attribute values (CSS strings) compare
+ <b>case-sensitively</b> by default; append {@code i} or {@code s} after the value to control this explicitly (e.g.
+ {@code [attr="val" i]}).
  </p>
  <p>
  The universal selector {@code *} is implicit when no element selector is supplied (i.e. {@code .header} and
@@ -45,6 +47,7 @@ import java.util.stream.Stream;
  <tr><td><code>[attr$=valSuffix]</code></td><td>elements with an attribute named "attr", and value ending with "valSuffix"</td><td><code>img[src$=.png]</code></td></tr>
  <tr><td><code>[attr*=valContaining]</code></td><td>elements with an attribute named "attr", and value containing "valContaining"</td><td><code>a[href*=/search/]</code></td></tr>
  <tr><td><code>[attr~=<em>regex</em>]</code></td><td>elements with an attribute named "attr", and value matching the regular expression</td><td><code>img[src~=(?i)\\.(png|jpe?g)]</code></td></tr>
+ <tr><td><code>[attr=val i]</code>, <code>[attr=val s]</code></td><td>elements with an attribute named "attr", and value equal to "val", compared case-insensitively (<code>i</code>) or case-sensitively (<code>s</code>). The modifier may be used with any value comparison (<code>=</code>, <code>!=</code>, <code>^=</code>, <code>$=</code>, <code>*=</code>), and follows quoted or unquoted values</td><td><code>input[type="TEXT" i]</code>, <code>a[rel=nofollow s]</code></td></tr>
  <tr><td><code>[*]</code></td><td>elements with any attribute</td><td><code>p[*]</code> finds <code>p</code> elements that have at least one attribute; <code>p:not([*])</code> finds those with no attributes</td></tr>
  <tr><td></td><td>The above may be combined in any order</td><td><code>div.header[title]</code></td></tr>
 

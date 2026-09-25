@@ -127,7 +127,10 @@ public class SelectorTest {
         assertEquals(1, foo.size());
 
         Elements foo2 = doc.select("[title=\"foo\"]");
-        assertEquals(1, foo2.size());
+        assertEquals(0, foo2.size()); // quoted values are case-sensitive by default
+
+        Elements foo2i = doc.select("[title=\"foo\" i]");
+        assertEquals(1, foo2i.size()); // unless flagged as insensitive
 
         Elements foo3 = doc.select("[title=\"Foo\"]");
         assertEquals(1, foo3.size());
@@ -1056,14 +1059,15 @@ public class SelectorTest {
 
         Elements found = doc.select("div[class=value ]");
         assertEquals(1, found.size());
-        assertEquals("class with space", found.get(0).text());
+        assertEquals("class without space", found.get(0).text()); // bare values end at whitespace; trailing space is ignored
 
         found = doc.select("div[class=\"value \"]");
         assertEquals(1, found.size());
         assertEquals("class with space", found.get(0).text());
 
         found = doc.select("div[class=\"value\\ \"]");
-        assertEquals(0, found.size());
+        assertEquals(1, found.size()); // CSS escape \ decodes to a space
+        assertEquals("class with space", found.get(0).text());
     }
 
     @Test public void selectSameElements() {
@@ -1935,6 +1939,65 @@ public class SelectorTest {
             () -> Selector.evaluatorOf(query)
         );
         assertEquals("Absolute attribute key must have a name", ex.getMessage());
+    }
+
+    @Test void attributeSelectorCaseModifiersAndEscapes() {
+        Document doc = Jsoup.parse(
+            "<a id=a data-v=\"A B\"></a><a id=b data-v=\"a b\"></a><a id=c data-v=\"x&quot;y\"></a>" +
+                "<a id=d data-v=\"\"></a><a id=f data-v=\"Alpha\"></a><i id=e></i>"
+        );
+
+        // quoted (CSS string) values compare case-sensitively by default; i and s modifiers override
+        assertSelectedIds(doc.select("body [data-v=\"A B\"]"), "a");
+        assertSelectedIds(doc.select("body [data-v=\"A B\" i]"), "a", "b");
+        assertSelectedIds(doc.select("body [data-v=\"a b\" s]"), "b");
+        assertSelectedIds(doc.select("body [data-v=\"Alpha\" S]"), "f");
+        assertSelectedIds(doc.select("body [data-v=\"alpha\"]"));
+        assertSelectedIds(doc.select("body [data-v=\"alpha\" I]"), "f");
+
+        // bare (unquoted) values keep the historical case-insensitive default
+        assertSelectedIds(doc.select("body [data-v=alpha]"), "f");
+        assertSelectedIds(doc.select("body [data-v^=alpha i]"), "f");
+        assertSelectedIds(doc.select("body [data-v^=alpha s]"));
+        assertSelectedIds(doc.select("body [data-v$=PHA i]"), "f");
+        assertSelectedIds(doc.select("body [data-v*=LPH i]"), "f");
+
+        // quoted values decode CSS escapes; empty vs missing attribute is preserved
+        assertSelectedIds(doc.select("body [data-v='x\\22 y']"), "c");
+        assertSelectedIds(doc.select("body [data-v=\"\"]"), "d");
+
+        // != is the complement of =; a missing attribute is a hit
+        assertSelectedIds(doc.select("body [data-v!=\"A B\"]"), "b", "c", "d", "f", "e");
+        assertSelectedIds(doc.select("body [data-v!=\"\"]"), "a", "b", "c", "f", "e");
+
+        // CSS escapes in attribute names are decoded before matching
+        assertSelectedIds(doc.select("body [\\64 ata-v=\"A B\"]"), "a");
+        assertSelectedIds(doc.select("body [d\\61 ta-v=\"A B\"]"), "a");
+        assertSelectedIds(doc.select("body [\\64 ata-v]"), "a", "b", "c", "d", "f");
+
+        // whitespace may appear around the operator and around the modifier
+        assertSelectedIds(doc.select("body [ data-v = \"A B\" ]"), "a");
+        assertSelectedIds(doc.select("body [data-v^=alpha  i]"), "f");
+
+        // ~= regex matching is unchanged
+        assertSelectedIds(doc.select("body [data-v~=B]"), "a");
+        assertSelectedIds(doc.select("body [data-v~=(?i)alpha]"), "f");
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {
+        "[data-v=a b]",     // bare value containing whitespace
+        "[data-v='a' i s]", // repeated modifier
+        "[data-v='a' i i]", // repeated modifier
+        "[data-v='a' x]",   // unknown modifier
+        "[data-v='a' is]",  // unknown modifier
+        "[data-v i]",       // modifier not after a value
+        "[data-v='a' i x]", // garbage after modifier
+        "[data-v='a'",      // unclosed quote
+        "[data-v=",         // unclosed attribute
+    })
+    void parseExceptionOnBadAttributeValue(String query) {
+        assertThrows(Selector.SelectorParseException.class, () -> Selector.evaluatorOf(query));
     }
 
     @Test void parseExceptionOnEmptyKeyVal() {

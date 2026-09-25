@@ -213,10 +213,44 @@ public class TokenQueue implements AutoCloseable {
                     c = 0;
                 }
             }
-            else 
+            else
                 out.append(c);
             last = c;
         }
+        return StringUtil.releaseBuilder(out);
+    }
+
+    /**
+     Consumes a CSS escape sequence off the head of the queue and appends the decoded output to {@code out}. The
+     current character must be the escape character ({@code \}). The escape may be a simple escaped character, or a
+     hexadecimal code point of up to 6 digits with an optional trailing whitespace (which is consumed).
+     @param out the builder to append the decoded escape to
+     @throws IllegalArgumentException if the escape sequence is incomplete (an escape character at the end of the input)
+     @see <a href="https://www.w3.org/TR/css-syntax-3/#consume-an-escaped-code-point">CSS Syntax Module Level 3, consume an escaped code point</a>
+     */
+    public void consumeCssEscapeSequence(StringBuilder out) {
+        advance(); // drop the escape character
+        if (isEmpty()) throw new IllegalArgumentException("Invalid escape sequence: \\ at end of input");
+        consumeCssEscapeSequenceInto(out);
+    }
+
+    /**
+     Decodes CSS escape sequences in the input string: a backslash followed by a character yields that character, and a
+     backslash followed by up to 6 hexadecimal digits (and one optional trailing whitespace) yields that code point.
+     @param in the string to decode
+     @return the decoded string
+     @throws IllegalArgumentException if an escape sequence is incomplete (an escape character at the end of the input)
+     */
+    public static String unescapeCss(String in) {
+        if (in.indexOf(Esc) == -1) return in;
+
+        StringBuilder out = StringUtil.borrowBuilder();
+        TokenQueue q = new TokenQueue(in);
+        while (!q.isEmpty()) {
+            if (q.matches(Esc)) q.consumeCssEscapeSequence(out);
+            else out.append(q.consume());
+        }
+        q.close();
         return StringUtil.releaseBuilder(out);
     }
 
