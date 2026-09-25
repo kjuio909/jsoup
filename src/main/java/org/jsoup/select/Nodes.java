@@ -1,11 +1,13 @@
 package org.jsoup.select;
 
+import org.jsoup.SerializationException;
 import org.jsoup.helper.Validate;
 import org.jsoup.internal.StringUtil;
 import org.jsoup.nodes.Element;
 import org.jsoup.nodes.Node;
 import org.jspecify.annotations.Nullable;
 
+import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
@@ -102,11 +104,50 @@ public class Nodes<T extends Node> extends ArrayList<T> {
      @return string of all node's outer HTML.
      @see Elements#text()
      @see Elements#html()
+     @see #outerHtml(Appendable)
      */
     public String outerHtml() {
-        return stream()
-            .map(Node::outerHtml)
-            .collect(StringUtil.joining("\n"));
+        StringBuilder sb = StringUtil.borrowBuilder();
+        outerHtml(sb);
+        return StringUtil.releaseBuilder(sb);
+    }
+
+    /**
+     Write the combined outer HTML of all nodes in this list, in iteration order, to the supplied {@link Appendable}.
+     <p>Each node is written directly as it is visited, rather than first being concatenated into a single string, which
+     allows streaming to large-document extractions, paginated transports, and log pipes. The nodes may be a mix of
+     {@link org.jsoup.nodes.Document Documents}, {@link Element Elements}, {@link org.jsoup.nodes.Comment comments},
+     {@link org.jsoup.nodes.DocumentType doctypes}, etc.; each node is written as many times as it appears in the list
+     (duplicate references are not deduplicated), and a single newline is written between successive nodes. An empty
+     list writes nothing.</p>
+     <p>Any existing content in the appendable is preserved: no newline is written before the first node, and each
+     subsequent newline is written only after the previous node has been fully written. The per-node HTML syntax, entity
+     escaping, {@code prettyPrint}, charset, and document-level output settings are exactly those used by calling
+     {@link Node#outerHtml(Appendable)} directly; nodes from different documents keep their own settings, and nodes
+     without an owning document use the existing defaults.</p>
+
+     @param appendable the {@link Appendable} that will receive the HTML.
+     @return the supplied {@link Appendable}, for chaining.
+     @throws SerializationException if the appendable throws an IOException; output stops immediately (no further
+     separator or node is written), while the prefix already written remains in place.
+     @see #outerHtml()
+     @see Node#outerHtml(Appendable)
+     @since 1.23.3
+     */
+    public <A extends Appendable> A outerHtml(A appendable) {
+        boolean first = true;
+        for (T node : this) {
+            if (!first) {
+                try {
+                    appendable.append('\n');
+                } catch (IOException e) {
+                    throw new SerializationException(e);
+                }
+            }
+            node.outerHtml(appendable);
+            first = false;
+        }
+        return appendable;
     }
 
     /**
