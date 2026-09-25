@@ -1,11 +1,13 @@
 package org.jsoup.select;
 
+import org.jsoup.SerializationException;
 import org.jsoup.helper.Validate;
 import org.jsoup.internal.StringUtil;
 import org.jsoup.nodes.Element;
 import org.jsoup.nodes.Node;
 import org.jspecify.annotations.Nullable;
 
+import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
@@ -104,9 +106,47 @@ public class Nodes<T extends Node> extends ArrayList<T> {
      @see Elements#html()
      */
     public String outerHtml() {
-        return stream()
-            .map(Node::outerHtml)
-            .collect(StringUtil.joining("\n"));
+        StringBuilder sb = StringUtil.borrowBuilder();
+        outerHtml(sb);
+        return StringUtil.releaseBuilder(sb);
+    }
+
+    /**
+     Write the outer HTML of each node in this collection, in iteration order, to the supplied {@link Appendable}. A
+     single newline is written between successive nodes: none before the first, none after the last. This streams each
+     node as it is written, rather than building the combined HTML in memory, and so is suitable for large documents,
+     paginated transmission, and log pipelines.
+     <p>Each node is rendered through its own {@link Node#outerHtml(Appendable)} entry point, so its syntax, entity
+     escaping, {@code prettyPrint}, charset, and other document-level output settings are honored exactly as if
+     {@code node.outerHtml()} were called directly; nodes from different documents retain their own settings, and
+     detached nodes use the defaults. Repeated references to the same node are written each time they occur.</p>
+     <p>The existing contents of the appendable are preserved, and nothing is written for an empty collection. If the
+     appendable throws an {@link IOException} while writing a separator or a node, it is reported as a
+     {@link org.jsoup.SerializationException} with the original cause, and writing stops immediately: no further
+     separator or node is written, while the prefix already written remains in the appendable.</p>
+
+     @param appendable the {@link Appendable} that will receive the HTML.
+     @return the supplied {@link Appendable}, for chaining.
+     @param <A> the type of the supplied {@link Appendable}
+     @throws org.jsoup.SerializationException if the appendable throws an IOException.
+     @see #outerHtml()
+     @see Node#outerHtml(Appendable)
+     @since 1.23.3
+     */
+    public <A extends Appendable> A outerHtml(A appendable) {
+        boolean first = true;
+        for (T node : this) {
+            if (!first) {
+                try {
+                    appendable.append('\n');
+                } catch (IOException e) {
+                    throw new SerializationException(e);
+                }
+            }
+            node.outerHtml(appendable);
+            first = false;
+        }
+        return appendable;
     }
 
     /**
