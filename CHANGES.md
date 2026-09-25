@@ -1,5 +1,10 @@
 # jsoup Changelog
 
+## 1.23.3 (unreleased)
+
+### Improvements
+* When an allowed `srcset` attribute is cleaned by `Jsoup.clean(String, Safelist)`, its value is now parsed into image candidates and each candidate URL is checked independently against the containing tag's protocol and relative-link rules. Invalid candidates (blank, malformed, bad `w`/`x` descriptor, or disallowed protocol) are dropped while the others keep their order, and the result is serialized in a stable, idempotent form (`url descriptor` pairs joined by `, `). Commas embedded in a URL (such as `data:image/png;base64,AAAA`) are preserved; an empty result removes the attribute.
+
 ## 1.23.2 (2026-Aug-26)
 
 ### Improvements

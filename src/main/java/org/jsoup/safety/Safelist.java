@@ -528,34 +528,68 @@ public class Safelist {
      * @return true if allowed
      */
     public boolean isSafeAttribute(String tagName, Element el, Attribute attr) {
+        return isSafeAttributeValue(tagName, el, attr.getKey(), attr.getValue());
+    }
+
+    /**
+     Test if the named attribute is explicitly allowed (not merely enforced) for this tag, without inspecting its
+     value. Protocol rules are not considered here. The {@link Cleaner} uses this to decide whether to run
+     value-level checks such as the per-candidate {@code srcset} validation; an enforced attribute is excluded
+     because its value is always replaced by the enforced value and is handled as a whole.
+     @param tagName tag to consider allowing the attribute in
+     @param attributeKey attribute under test
+     @return true if the attribute is explicitly allowed
+     */
+    boolean isAttributeAllowed(String tagName, String attributeKey) {
         TagName tag = TagName.valueOf(tagName);
-        AttributeKey key = AttributeKey.valueOf(attr.getKey());
+        AttributeKey key = AttributeKey.valueOf(attributeKey);
+
+        Set<AttributeKey> okSet = attributes.get(tag);
+        if (okSet != null && okSet.contains(key))
+            return true;
+
+        // no attributes defined for tag, try :all tag (enforced attributes are deliberately not considered)
+        return !tagName.equals(All) && isAttributeAllowed(All, attributeKey);
+    }
+
+    /**
+     Test if a single URL value is safe for the named URL attribute on the given element, applying the protocol
+     rules configured for that tag+attribute pair (falling back to {@code :all}), and honoring the relative-link
+     setting via the element's base URI. Each {@code srcset} candidate is checked independently with this method.
+     @param tagName tag the URL is in
+     @param el element under test, supplies the base URI for relative resolution
+     @param attributeKey the URL attribute name
+     @param value the raw candidate URL
+     @return true if the value passes the attribute's protocol rules
+     */
+    boolean isSafeAttributeValue(String tagName, Element el, String attributeKey, String value) {
+        TagName tag = TagName.valueOf(tagName);
+        AttributeKey key = AttributeKey.valueOf(attributeKey);
 
         Set<AttributeKey> okSet = attributes.get(tag);
         if (okSet != null && okSet.contains(key)) {
             if (protocols.containsKey(tag)) {
                 Map<AttributeKey, Set<Protocol>> attrProts = protocols.get(tag);
                 // ok if not defined protocol; otherwise test
-                return !attrProts.containsKey(key) || isSafeProtocol(getProtocolValue(el, attr), attrProts.get(key));
+                return !attrProts.containsKey(key) ||
+                    isSafeProtocol(getProtocolValue(el, key, value), attrProts.get(key));
             } else { // attribute found, no protocols defined, so OK
                 return true;
             }
         }
         Map<AttributeKey, AttributeValue> enforcedSet = enforcedAttributes.get(tag);
         if (enforcedSet != null && enforcedSet.containsKey(key)) {
-            // enforced attr key was LCed via AttributeKey.valueOf(attr.getKey()),
-            // if the input already has that exact value, treat it as safe
-            return enforcedSet.get(key).equals(AttributeValue.valueOf(attr.getValue()));
+            return enforcedSet.get(key).equals(AttributeValue.valueOf(value));
         }
         // no attributes defined for tag, try :all tag
-        return !tagName.equals(All) && isSafeAttribute(All, el, attr);
+        return !tagName.equals(All) && isSafeAttributeValue(All, el, attributeKey, value);
     }
 
-    private String getProtocolValue(Element el, Attribute attr) {
-        String value = el.absUrl(attr.getKey());
-        if (value.isEmpty() && !StringUtil.hasHttpScheme(attr.getValue()))
-            value = attr.getValue(); // if it could not be made abs, run as-is to allow custom unknown protocols
-        return value;
+    private String getProtocolValue(Element el, AttributeKey key, String value) {
+        String resolved = StringUtil.resolve(el.baseUri(), value); // mirrors Element.absUrl for the raw candidate value
+        if (resolved.isEmpty() && !StringUtil.hasHttpScheme(value))
+            resolved = value; // if it could not be made abs, run as-is to allow custom unknown protocols
+        return resolved;
     }
 
     private boolean isSafeProtocol(String value, Set<Protocol> protocols) {

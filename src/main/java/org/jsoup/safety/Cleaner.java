@@ -1,6 +1,7 @@
 package org.jsoup.safety;
 
 import org.jsoup.helper.Validate;
+import org.jsoup.internal.StringUtil;
 import org.jsoup.nodes.Attribute;
 import org.jsoup.nodes.Attributes;
 import org.jsoup.nodes.DataNode;
@@ -194,8 +195,20 @@ public class Cleaner {
         int numDiscarded = 0;
         Attributes sourceAttrs = sourceEl.attributes();
         for (Attribute sourceAttr : sourceAttrs) {
-            if (safelist.isSafeAttribute(sourceTag, sourceEl, sourceAttr)) { // will keep this attr
-                String key = sourceAttr.getKey();
+            String key = sourceAttr.getKey();
+
+            if (SrcSetKey.equalsIgnoreCase(key) &&
+                safelist.isAttributeAllowed(sourceTag, SrcSetKey)) { // srcset allowed: validate each candidate
+                SrcSetClean result = cleanSrcSet(sourceEl, sourceTag, sourceAttr.getValue());
+                if (result.value == null) { // blank input, or no candidate survived: remove the attribute
+                    numDiscarded += Math.max(1, result.discarded);
+                    continue;
+                }
+                numDiscarded += result.discarded;
+                Range.AttributeRange range = sourceAttrs.sourceRange(key);
+                destAttrs.put(key, result.value);
+                NodeInternals.attributeRange(destAttrs, key, range);
+            } else if (safelist.isSafeAttribute(sourceTag, sourceEl, sourceAttr)) { // will keep this attr
                 String value = sourceAttr.getValue();
 
                 if (safelist.shouldAbsUrl(sourceTag, key)) { // configured to make absolute urls for this key (href)
@@ -242,6 +255,197 @@ public class Cleaner {
             this.el = el;
             this.numAttribsDiscarded = numAttribsDiscarded;
         }
+    }
+
+    // The srcset attribute name, for which candidates are parsed and protocol-checked independently.
+    private static final String SrcSetKey = "srcset";
+
+    /** Holds a cleaned srcset value and the number of candidates that were dropped. */
+    private static final class SrcSetClean {
+        final String value; // normalized value, or null if no candidate survived (remove the attribute)
+        final int discarded; // count of invalid/dropped candidates
+
+        SrcSetClean(String value, int discarded) {
+            this.value = value;
+            this.discarded = discarded;
+        }
+    }
+
+    /**
+     Clean an {@code srcset} attribute value: parse it into image candidates, validate each candidate's URL against
+     the safelist rules of the containing tag, and serialize the survivors in a stable, idempotent form.
+     <p>Parsing follows the srcset candidate rules: a comma directly surrounded by non-whitespace URL characters is
+     part of the URL (as in {@code data:image/png;base64,AAAA}); any other comma separates candidates, optional
+     whitespace around it is insignificant, and consecutive separators produce empty, invalid candidates. After the
+     URL, at most one descriptor ({@code Nw} or {@code Nx}) may follow, introduced by whitespace.</p>
+     @param sourceEl the owning element (supplies the base URI for relative/protocol resolution)
+     @param sourceTag the owning tag's name
+     @param srcset the raw attribute value
+     @return the normalized value (or {@code null} if no candidate survived) plus the number of dropped candidates
+     */
+    private SrcSetClean cleanSrcSet(Element sourceEl, String sourceTag, String srcset) {
+        StringBuilder out = new StringBuilder();
+        int discarded = 0;
+        int len = srcset.length();
+        int pos = 0;
+
+        while (pos < len) {
+            // splitting loop: ignore leading whitespace; a comma here marks an empty candidate (leading or repeated
+            // separator), which is invalid
+            while (pos < len && isAsciiWhitespace(srcset.charAt(pos)))
+                pos++;
+            if (pos >= len)
+                break;
+            if (srcset.charAt(pos) == ',') {
+                discarded++;
+                pos++;
+                continue;
+            }
+
+            // URL collection: consecutive non-whitespace characters. A comma belongs to the URL when the character
+            // after it is also a URL character (not whitespace or another comma), as in
+            // data:image/png;base64,AAAA; otherwise it ends the candidate and is consumed by the next splitting
+            // iteration. Consecutive commas therefore yield empty, invalid candidates.
+            int urlStart = pos;
+            while (pos < len) {
+                char c = srcset.charAt(pos);
+                if (isAsciiWhitespace(c))
+                    break;
+                if (c == ',') {
+                    boolean embedded = pos + 1 < len && isRegularUrlChar(srcset.charAt(pos + 1));
+                    if (!embedded)
+                        break;
+                }
+                pos++;
+            }
+            String url = srcset.substring(urlStart, pos);
+
+            // descriptor tokenizer: whitespace then, optionally, exactly one descriptor token; further tokens or a
+            // bad descriptor invalidate the candidate
+            String descriptor = null;
+            boolean invalid = false;
+            while (pos < len) {
+                while (pos < len && isAsciiWhitespace(srcset.charAt(pos)))
+                    pos++;
+                if (pos >= len || srcset.charAt(pos) == ',')
+                    break;
+                int tokenStart = pos;
+                while (pos < len && !isAsciiWhitespace(srcset.charAt(pos)) && srcset.charAt(pos) != ',')
+                    pos++;
+                String token = srcset.substring(tokenStart, pos);
+                if (descriptor == null)
+                    descriptor = token;
+                else
+                    invalid = true; // more than one descriptor token
+            }
+            if (!invalid && descriptor != null && !isValidSrcSetDescriptor(descriptor))
+                invalid = true;
+
+            if (!invalid) {
+                String safeUrl = resolveSrcSetUrl(sourceEl, sourceTag, url);
+                if (safeUrl != null) {
+                    if (out.length() > 0)
+                        out.append(", ");
+                    out.append(safeUrl);
+                    if (descriptor != null)
+                        out.append(' ').append(descriptor);
+                } else {
+                    discarded++; // failed this tag's protocol rules, or relative links are not preserved
+                }
+            } else {
+                discarded++;
+            }
+
+            if (pos < len && srcset.charAt(pos) == ',')
+                pos++; // consume the candidate-ending comma
+        }
+
+        return new SrcSetClean(out.length() == 0 ? null : out.toString(), discarded);
+    }
+
+    /**
+     Run the existing per-attribute protocol check for one srcset candidate URL and, when the safelist normalizes URL
+     attributes for this tag (relative links not preserved), return the resolved absolute URL.
+     @return the URL to output, or {@code null} if the candidate fails the tag's protocol rules
+     */
+    private String resolveSrcSetUrl(Element sourceEl, String sourceTag, String url) {
+        if (!safelist.isSafeAttributeValue(sourceTag, sourceEl, SrcSetKey, url))
+            return null;
+        if (safelist.shouldAbsUrl(sourceTag, SrcSetKey)) {
+            String resolved = StringUtil.resolve(sourceEl.baseUri(), url);
+            return resolved.isEmpty() ? url : resolved; // mirror createSafeElement's fallback for custom protocols
+        }
+        return url;
+    }
+
+    /**
+     Validate an srcset descriptor: a positive integer width ({@code 123w}) or a positive number density
+     ({@code 2x}). A density number is plain digits or digits-dot-digits; signs, exponents, missing fraction
+     digits, and zero values are rejected.
+     */
+    private static boolean isValidSrcSetDescriptor(String descriptor) {
+        int len = descriptor.length();
+        if (len < 2)
+            return false;
+        char suffix = descriptor.charAt(len - 1);
+
+        if (suffix == 'w')
+            return isPositiveInteger(descriptor, 0, len - 1);
+        if (suffix == 'x')
+            return isPositiveNumber(descriptor, 0, len - 1);
+        return false; // unknown descriptor
+    }
+
+    /** A positive integer: one or more ASCII digits with a value greater than zero. */
+    private static boolean isPositiveInteger(String s, int from, int to) {
+        if (from >= to)
+            return false;
+        boolean nonZero = false;
+        for (int i = from; i < to; i++) {
+            char c = s.charAt(i);
+            if (c < '0' || c > '9')
+                return false;
+            if (c != '0')
+                nonZero = true;
+        }
+        return nonZero;
+    }
+
+    /**
+     A positive number in plain-digit form ({@code 2}, {@code 1.5}) or digits-dot-digits ({@code 2.0}); no sign,
+     exponent, or dangling decimal point. Zero values are rejected.
+     */
+    private static boolean isPositiveNumber(String s, int from, int to) {
+        if (from >= to)
+            return false;
+        int dot = -1;
+        for (int i = from; i < to; i++) {
+            char c = s.charAt(i);
+            if (c == '.') {
+                if (dot != -1)
+                    return false; // more than one dot
+                dot = i;
+            } else if (c < '0' || c > '9') {
+                return false; // sign, exponent, or any other character
+            }
+        }
+        if (dot != -1 && (dot == from || dot == to - 1))
+            return false; // dot must have digits on both sides
+        // reject a zero value (e.g. 0, 0.0, 00.000)
+        for (int i = from; i < to; i++) {
+            char c = s.charAt(i);
+            if (c != '0' && c != '.')
+                return true;
+        }
+        return false;
+    }
+
+    private static boolean isRegularUrlChar(char c) {
+        return c != ',' && !isAsciiWhitespace(c);
+    }
+
+    private static boolean isAsciiWhitespace(char c) {
+        return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f';
     }
 
 }
