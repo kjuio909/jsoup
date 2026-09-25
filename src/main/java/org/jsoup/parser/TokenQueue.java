@@ -213,11 +213,54 @@ public class TokenQueue implements AutoCloseable {
                     c = 0;
                 }
             }
-            else 
+            else
                 out.append(c);
             last = c;
         }
         return StringUtil.releaseBuilder(out);
+    }
+
+    /**
+     Decodes CSS escape sequences (a backslash followed by a character, or up to 6 hexadecimal digits with optional
+     trailing whitespace) in the input string.
+     @param in the escaped string
+     @return the decoded string
+     @throws IllegalArgumentException if an escape sequence is incomplete (a trailing backslash)
+     @see <a href="https://www.w3.org/TR/css-syntax-3/#consume-an-escaped-code-point">CSS Syntax Module Level 3, consume an escaped code point</a>
+     */
+    public static String unescapeCss(String in) {
+        if (in.indexOf(Esc) == -1) return in;
+
+        StringBuilder out = StringUtil.borrowBuilder();
+        TokenQueue q = new TokenQueue(in);
+        try {
+            while (!q.isEmpty()) {
+                char c = q.consume();
+                if (c == Esc) {
+                    if (q.isEmpty())
+                        throw new IllegalArgumentException("Invalid escape sequence: input ends after the escape character");
+                    q.consumeCssEscapeSequenceInto(out);
+                } else {
+                    out.append(c);
+                }
+            }
+        } finally {
+            q.close();
+        }
+        return StringUtil.releaseBuilder(out);
+    }
+
+    /**
+     Consumes a CSS escape sequence off the queue and appends the decoded code point(s) to {@code out}. The current
+     character must be the escape character ({@code \}). Handles hexadecimal escapes (up to 6 digits, with one
+     optional trailing whitespace character) and simple escapes.
+     @param out the builder to append the decoded character(s) to
+     @throws IllegalArgumentException if the escape sequence is incomplete (a trailing backslash)
+     */
+    public void consumeCssEscapeInto(StringBuilder out) {
+        consume(); // the escape character
+        if (isEmpty()) throw new IllegalArgumentException("Invalid escape sequence: input ends after the escape character");
+        consumeCssEscapeSequenceInto(out);
     }
 
     /**

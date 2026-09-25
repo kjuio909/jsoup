@@ -45,6 +45,9 @@ import java.util.stream.Stream;
  <tr><td><code>[attr$=valSuffix]</code></td><td>elements with an attribute named "attr", and value ending with "valSuffix"</td><td><code>img[src$=.png]</code></td></tr>
  <tr><td><code>[attr*=valContaining]</code></td><td>elements with an attribute named "attr", and value containing "valContaining"</td><td><code>a[href*=/search/]</code></td></tr>
  <tr><td><code>[attr~=<em>regex</em>]</code></td><td>elements with an attribute named "attr", and value matching the regular expression</td><td><code>img[src~=(?i)\\.(png|jpe?g)]</code></td></tr>
+ <tr><td><code>[attr=val i]</code></td><td>attribute value comparison that ignores case (the default is case-sensitive); may be used with any of the value operators</td><td><code>input[type=TEXT i]</code>, <code>a[rel=nofollow i]</code></td></tr>
+ <tr><td><code>[attr=val s]</code></td><td>attribute value comparison that is explicitly case-sensitive</td><td><code>[data-state=Active s]</code></td></tr>
+ <tr><td></td><td>Attribute names are case-insensitive, and may contain CSS escapes (e.g. <code>[\64 ata]</code> is <code>[data]</code>). Quoted values decode CSS string escapes (e.g. <code>[a='x\22 y']</code>); unquoted values end at whitespace. A missing attribute is a hit for <code>!=</code>, and is distinct from an empty value.</td><td></td></tr>
  <tr><td><code>[*]</code></td><td>elements with any attribute</td><td><code>p[*]</code> finds <code>p</code> elements that have at least one attribute; <code>p:not([*])</code> finds those with no attributes</td></tr>
  <tr><td></td><td>The above may be combined in any order</td><td><code>div.header[title]</code></td></tr>
 

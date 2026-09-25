@@ -235,7 +235,7 @@ public final class DataUtil {
         return doc;
     }
 
-    private static final Evaluator metaCharset = Selector.evaluatorOf("meta[http-equiv=content-type], meta[charset]");
+    private static final Evaluator metaCharset = Selector.evaluatorOf("meta[http-equiv=content-type i], meta[charset]");
 
     /** Detects charset for a regular parse, and may reuse a fully sniffed document. */
     static CharsetDoc detectCharset(ControllableInputStream input, @Nullable String charsetName, String baseUri, Parser parser) throws IOException {

@@ -105,7 +105,7 @@ public class SelectorTest {
     @Test public void testByClassCaseInsensitive() {
         String html = "<p Class=foo>One <p Class=Foo>Two <p class=FOO>Three <p class=farp>Four";
         Elements elsFromClass = Jsoup.parse(html).select("P.Foo");
-        Elements elsFromAttr = Jsoup.parse(html).select("p[class=foo]");
+        Elements elsFromAttr = Jsoup.parse(html).select("p[class=foo i]");
 
         assertEquals(elsFromAttr.size(), elsFromClass.size());
         assertSelectedOwnText(elsFromClass, "One", "Two", "Three");
@@ -123,10 +123,13 @@ public class SelectorTest {
         Elements withTitle = doc.select("[title]");
         assertEquals(4, withTitle.size());
 
-        Elements foo = doc.select("[TITLE=foo]");
+        Elements foo = doc.select("[TITLE=foo i]"); // value compare is case-sensitive by default; i ignores case
         assertEquals(1, foo.size());
 
-        Elements foo2 = doc.select("[title=\"foo\"]");
+        Elements fooSensitive = doc.select("[TITLE=foo]");
+        assertEquals(0, fooSensitive.size());
+
+        Elements foo2 = doc.select("[title=\"foo\" i]");
         assertEquals(1, foo2.size());
 
         Elements foo3 = doc.select("[title=\"Foo\"]");
@@ -136,21 +139,24 @@ public class SelectorTest {
         assertEquals(1, dataName.size());
         assertEquals("with spaces", dataName.first().attr("data-name"));
 
-        Elements not = doc.select("div[title!=bar]");
+        Elements not = doc.select("div[title!=bar i]");
         assertEquals(5, not.size());
         assertEquals("Foo", not.first().attr("title"));
 
-        Elements starts = doc.select("[title^=ba]");
+        Elements notSensitive = doc.select("div[title!=bar]"); // case-sensitive: only an exact "bar" is excluded
+        assertEquals(6, notSensitive.size());
+
+        Elements starts = doc.select("[title^=ba i]");
         assertEquals(2, starts.size());
         assertEquals("Bar", starts.first().attr("title"));
         assertEquals("Balim", starts.last().attr("title"));
 
-        Elements ends = doc.select("[title$=im]");
+        Elements ends = doc.select("[title$=im i]");
         assertEquals(2, ends.size());
         assertEquals("Balim", ends.first().attr("title"));
         assertEquals("SLIM", ends.last().attr("title"));
 
-        Elements contains = doc.select("[title*=i]");
+        Elements contains = doc.select("[title*=i i]");
         assertEquals(2, contains.size());
         assertEquals("Balim", contains.first().attr("title"));
         assertEquals("SLIM", contains.last().attr("title"));
@@ -444,8 +450,9 @@ public class SelectorTest {
         Document doc = Jsoup.parse(h);
 
         assertEquals(2, doc.select("DiV").size());
-        assertEquals(1, doc.select("DiV[TiTLE]").size());
-        assertEquals(1, doc.select("DiV[TiTLE=BAR]").size());
+        assertEquals(1, doc.select("DiV[TiTLE]").size()); // attribute names are case-insensitive
+        assertEquals(1, doc.select("DiV[TiTLE=BAR i]").size()); // values are case-sensitive by default; i ignores case
+        assertEquals(0, doc.select("DiV[TiTLE=BAR]").size());
         assertEquals(0, doc.select("DiV[TiTLE=BARBARELLA]").size());
     }
 
@@ -1054,16 +1061,19 @@ public class SelectorTest {
 
         Document doc = Jsoup.parse(html);
 
+        // unquoted values end at whitespace; trailing whitespace before ] is skipped
         Elements found = doc.select("div[class=value ]");
         assertEquals(1, found.size());
-        assertEquals("class with space", found.get(0).text());
+        assertEquals("class without space", found.get(0).text());
 
         found = doc.select("div[class=\"value \"]");
         assertEquals(1, found.size());
         assertEquals("class with space", found.get(0).text());
 
+        // a backslash-escaped space in a quoted value decodes to a literal space
         found = doc.select("div[class=\"value\\ \"]");
-        assertEquals(0, found.size());
+        assertEquals(1, found.size());
+        assertEquals("class with space", found.get(0).text());
     }
 
     @Test public void selectSameElements() {
@@ -1925,6 +1935,96 @@ public class SelectorTest {
         assertSelectedIds(doc.select("div[data^='']"), "1", "2", "3");
         assertSelectedIds(doc.select("div[data$='']"), "1", "2", "3");
         assertSelectedIds(doc.select("div[data*='']"), "1", "2", "3");
+    }
+
+    private static Document attrValueDoc() {
+        return Jsoup.parse(
+            "<a id=a data-v=\"A B\"></a><a id=b data-v=\"a b\"></a><a id=c data-v=\"x&quot;y\"></a>" +
+                "<a id=d data-v=\"\"></a><a id=f data-v=\"Alpha\"></a><i id=e></i>");
+    }
+
+    @Test void attributeValueCaseSensitivity() {
+        Document doc = attrValueDoc();
+
+        // value comparison is case-sensitive by default; i ignores case; s forces case-sensitivity
+        assertSelectedIds(doc.select("[data-v=\"A B\"]"), "a");
+        assertSelectedIds(doc.select("[data-v=\"A B\" i]"), "a", "b");
+        assertSelectedIds(doc.select("[data-v=\"A B\" I]"), "a", "b");
+        assertSelectedIds(doc.select("[data-v=\"a b\" s]"), "b");
+        assertSelectedIds(doc.select("[data-v^=alpha]"));
+        assertSelectedIds(doc.select("[data-v^=alpha i]"), "f");
+        assertSelectedIds(doc.select("[data-v^=alpha s]"));
+        assertSelectedIds(doc.select("[data-v$=B]"), "a");
+        assertSelectedIds(doc.select("[data-v$=b i]"), "a", "b");
+        assertSelectedIds(doc.select("[data-v*=LPHA i]"), "f");
+        assertSelectedIds(doc.select("[data-v*=LPHA]"));
+    }
+
+    @Test void attributeNegationIncludesMissingAndDistinguishesEmpty() {
+        Document doc = attrValueDoc();
+
+        // negation is the complement of the exact match; a missing attribute is a negation hit
+        assertSelectedIds(doc.select("body > [data-v!=\"A B\"]"), "b", "c", "d", "f", "e");
+        assertSelectedIds(doc.select("body > [data-v!=\"A B\" i]"), "c", "d", "f", "e");
+        assertSelectedIds(doc.select("body > [data-v!=\"A B\" s]"), "b", "c", "d", "f", "e");
+
+        // an empty value is distinct from a missing attribute
+        assertSelectedIds(doc.select("[data-v=\"\"]"), "d");
+        assertSelectedIds(doc.select("body > [data-v!=\"\"]"), "a", "b", "c", "f", "e");
+    }
+
+    @Test void attributeNameCssEscapes() {
+        Document doc = Jsoup.parse("<p id=1 data-v=x></p><p id=2></p>");
+
+        assertSelectedIds(doc.select("[\\64 ata-v]"), "1");
+        assertSelectedIds(doc.select("[d\\61 ta-v]"), "1");
+        assertSelectedIds(doc.select("[data\\2d v]"), "1");
+        assertSelectedIds(doc.select("[\\64 ATA-V]"), "1"); // names remain case-insensitive after decoding
+        assertSelectedIds(doc.select("[data-v]"), "1");
+
+        Document doc2 = attrValueDoc();
+        assertSelectedIds(doc2.select("[\\64 ata-v=\"A B\"]"), "a");
+        assertSelectedIds(doc2.select("[data-v=\"A B\"]"), "a");
+    }
+
+    @Test void attributeValueCssEscapes() {
+        Document doc = Jsoup.parse(
+            "<a id=a data-v=\"x&quot;y\"></a><a id=b data-v=\"a=b\"></a><a id=c data-v=\"q'z\"></a><a id=d data-v=\"A B\"></a>");
+
+        assertSelectedIds(doc.select("[data-v='x\\22 y']"), "a"); // hexadecimal escape for "
+        assertSelectedIds(doc.select("[data-v=\"x\\\"y\"]"), "a"); // backslash-escaped quote
+        assertSelectedIds(doc.select("[data-v='a=b']"), "b"); // = inside quotes is part of the value
+        assertSelectedIds(doc.select("[data-v=\"q'z\"]"), "c"); // the other quote type inside quotes
+        assertSelectedIds(doc.select("[data-v='A B']"), "d"); // whitespace inside quotes is part of the value
+    }
+
+    @Test void attributeOperatorWhitespace() {
+        Document doc = Jsoup.parse("<p id=1 data-v=foo></p><p id=2 data-v=bar></p>");
+
+        assertSelectedIds(doc.select("[ data-v = foo ]"), "1");
+        assertSelectedIds(doc.select("[data-v = 'foo' ]"), "1");
+        assertSelectedIds(doc.select("[data-v= foo]"), "1");
+        assertSelectedIds(doc.select("[data-v =foo]"), "1");
+        assertSelectedIds(doc.select("[data-v\t=\tfoo]"), "1");
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {
+        "[data-v=A B]",   // whitespace in an unquoted value
+        "[data-v=A q]",   // unknown modifier
+        "[data-v=A i s]", // duplicate modifier
+        "[data-v=A ii]",  // repeated modifier
+        "[data-v i=A]",   // modifier before the value
+        "[data-v i]",     // modifier without a value
+        "[data-v='A",     // unclosed quote (and bracket)
+        "[data-v=\"A",    // unclosed quote
+        "[data-v=A",      // unclosed bracket
+        "[data-v",        // unclosed bracket
+        "[data-v='x\\",   // incomplete escape sequence
+        "[data-v=\"x\\",  // incomplete escape sequence
+    })
+    void attributeSelectorParseErrors(String query) {
+        assertThrows(Selector.SelectorParseException.class, () -> Selector.evaluatorOf(query));
     }
 
     @ParameterizedTest
