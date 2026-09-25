@@ -3,6 +3,7 @@
 ## 1.23.3 (pending)
 
 ### Improvements
+* Added `Cleaner.isValid(String, Safelist)`, a static pre-validation entry point that tests a body HTML fragment against a safelist using the same safety judgment as the cleaner, so input that passes validation is never silently rewritten by cleaning. `Jsoup.isValid(String, Safelist)` now delegates to it. As part of aligning the two, single-value URL attributes containing control characters or internal whitespace, or consisting of a bare protocol scheme with no content after the colon (e.g. `mailto:`), are now rejected by both cleaning and validation. Empty and whitespace-only values, relative-link handling under `preserveRelativeLinks`, and per-candidate `srcset` cleaning are unchanged.
 * The `Cleaner` now safely supports the `srcset` attribute. When `srcset` is allowed by the `Safelist`, its value is parsed into individual candidates: each candidate URL is checked against the protocols configured for the attribute on that tag (and relative URLs are kept only when `preserveRelativeLinks` is enabled), candidates with invalid syntax or descriptors are dropped, and the survivors are emitted in a normalized `url descriptor, url descriptor` form. If no candidates survive, the attribute is removed. Cleaning is idempotent, so re-cleaning the output is stable.
 
 ## 1.23.2 (2026-Aug-26)

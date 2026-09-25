@@ -230,6 +230,83 @@ public class CleanerTest {
         assertFalse(new Cleaner(Safelist.none()).isValid(okDoc));
     }
 
+    @Test public void testIsValidStaticEntry() {
+        // the static Cleaner.isValid(String, Safelist) entry applies the same judgment as cleaning
+        String ok = "<p>Test <b><a href='http://example.com/' rel='nofollow'>OK</a></b></p>";
+        String nok = "<p><script></script>Not <b>OK</b></p>";
+        assertTrue(Cleaner.isValid(ok, Safelist.basic()));
+        assertFalse(Cleaner.isValid(nok, Safelist.basic()));
+        assertFalse(Cleaner.isValid(ok, Safelist.none()));
+
+        // repeated checks of the same input and safelist are stable
+        Safelist safelist = Safelist.basic();
+        assertEquals(Cleaner.isValid(ok, safelist), Cleaner.isValid(ok, safelist));
+
+        // and configuration changes are reflected immediately
+        assertFalse(Cleaner.isValid("<div>One</div>", safelist));
+        safelist.addTags("div");
+        assertTrue(Cleaner.isValid("<div>One</div>", safelist));
+        safelist.removeTags("div");
+        assertFalse(Cleaner.isValid("<div>One</div>", safelist));
+    }
+
+    @Test public void testIsValidUrlProtocols() {
+        Safelist basic = Safelist.basic();
+
+        // protocol check is case-insensitive on the address
+        assertTrue(Cleaner.isValid("<a href='HTTP://example.com/'>One</a>", basic));
+        assertTrue(Cleaner.isValid("<a href='Mailto:info@example.com'>One</a>", basic));
+
+        // absolute URLs are only valid with an explicitly allowed protocol
+        assertFalse(Cleaner.isValid("<a href='unknown://example.com/'>One</a>", basic));
+        assertFalse(Cleaner.isValid("<a href='javascript:alert(1)'>One</a>", basic));
+
+        // a protocol with no content after the separator is invalid
+        assertFalse(Cleaner.isValid("<a href='http:'>One</a>", basic));
+        assertFalse(Cleaner.isValid("<a href='mailto:'>One</a>", basic));
+
+        // control characters or whitespace within the URL are invalid
+        assertFalse(Cleaner.isValid("<a href='http://exa mple.com/'>One</a>", basic));
+        assertFalse(Cleaner.isValid("<a href='http://exa\tmple.com/'>One</a>", basic));
+        assertFalse(Cleaner.isValid("<a href='http://exa&#0001;mple.com/'>One</a>", basic));
+        assertFalse(Cleaner.isValid("<a href='&#0013;ja&Tab;vascript&#0010;:alert(1)'>One</a>", basic));
+
+        // one tag's protocol configuration does not loosen another tag's
+        Safelist perTag = Safelist.basicWithImages().addProtocols("a", "href", "cid");
+        assertTrue(Cleaner.isValid("<a href='cid:12345'>One</a>", perTag));
+        assertFalse(Cleaner.isValid("<img src='cid:12345'>", perTag));
+    }
+
+    @Test public void testIsValidRelativeLinks() {
+        Safelist preserve = Safelist.basic().preserveRelativeLinks(true);
+        // with preserveRelativeLinks on, protocol-less references are valid as-is
+        assertTrue(Cleaner.isValid("<a href='relative/path'>One</a>", preserve));
+        assertTrue(Cleaner.isValid("<a href='/root/relative'>One</a>", preserve));
+        assertTrue(Cleaner.isValid("<a href='//example.com/x'>One</a>", preserve));
+        assertTrue(Cleaner.isValid("<a href='#fragment'>One</a>", preserve));
+        assertTrue(Cleaner.isValid("<a href='?query=1'>One</a>", preserve));
+
+        // with it off, they are all invalid
+        Safelist noPreserve = Safelist.basic();
+        assertFalse(Cleaner.isValid("<a href='relative/path'>One</a>", noPreserve));
+        assertFalse(Cleaner.isValid("<a href='/root/relative'>One</a>", noPreserve));
+        assertFalse(Cleaner.isValid("<a href='//example.com/x'>One</a>", noPreserve));
+        assertFalse(Cleaner.isValid("<a href='#fragment'>One</a>", noPreserve));
+        assertFalse(Cleaner.isValid("<a href='?query=1'>One</a>", noPreserve));
+
+        // the setting does not make a disallowed absolute protocol valid
+        assertFalse(Cleaner.isValid("<a href='javascript:alert(1)'>One</a>", preserve));
+
+        // toggling the setting takes effect immediately
+        Safelist safelist = Safelist.basic();
+        String html = "<a href='/foo'>One</a>";
+        assertFalse(Cleaner.isValid(html, safelist));
+        safelist.preserveRelativeLinks(true);
+        assertTrue(Cleaner.isValid(html, safelist));
+        safelist.preserveRelativeLinks(false);
+        assertFalse(Cleaner.isValid(html, safelist));
+    }
+
     @Test void configuredCleanerMayBeSharedAcrossThreads() throws InterruptedException {
         // https://github.com/jhy/jsoup/issues/2473
         String html = "<a href='/foo'>Link</a><img src='/bar' alt='Q'>";

@@ -18,6 +18,7 @@ import java.util.Iterator;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.regex.Pattern;
 
 import static org.jsoup.internal.Normalizer.lowerCase;
 
@@ -542,7 +543,8 @@ public class Safelist {
                 Map<AttributeKey, Set<Protocol>> attrProts = protocols.get(tag);
                 // ok if not defined protocol; otherwise test. srcset URLs are tested per candidate in the Cleaner.
                 return !attrProts.containsKey(key) || isSrcset(attr.getKey())
-                    || isSafeProtocol(getProtocolValue(el, attr), attrProts.get(key));
+                    || (isSoundUrlValue(attr.getValue())
+                        && isSafeProtocol(getProtocolValue(el, attr), attrProts.get(key)));
             } else { // attribute found, no protocols defined, so OK
                 return true;
             }
@@ -562,6 +564,23 @@ public class Safelist {
         if (value.isEmpty() && !StringUtil.hasHttpScheme(attr.getValue()))
             value = attr.getValue(); // if it could not be made abs, run as-is to allow custom unknown protocols
         return value;
+    }
+
+    private static final Pattern BareScheme = Pattern.compile("^[a-zA-Z][a-zA-Z0-9+-.]*:$");
+
+    /**
+     Tests if a single-value URL attribute value is structurally sound for protocol validation. Empty and
+     whitespace-only values are left to the standard resolution rules. Otherwise, the value must not contain control
+     characters or whitespace, and must not be a bare scheme (e.g. {@code "mailto:"}) with no content after the
+     colon.
+     */
+    private static boolean isSoundUrlValue(String value) {
+        if (StringUtil.isBlank(value)) return true; // blank values follow the standard resolution rules
+        for (int i = 0, length = value.length(); i < length; i++) {
+            char c = value.charAt(i);
+            if (c <= 0x20 || c == 0x7f) return false; // control character or whitespace within the URL
+        }
+        return !BareScheme.matcher(value).matches();
     }
 
     private boolean isSafeProtocol(String value, Set<Protocol> protocols) {
