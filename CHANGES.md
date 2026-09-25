@@ -1,5 +1,10 @@
 # jsoup Changelog
 
+## 1.23.3 (pending)
+
+### Improvements
+* Aligned `FormElement#formData()` and `FormElement#elements()` with browser form submission rules. Form control ownership is now resolved against the current DOM on each call: controls with a `form` attribute are associated with the first same-document form carrying that ID (even outside the form's subtree, and with no fallback to an ancestor form when the ID is empty or missing), while controls without one belong to their nearest ancestor form. Controls moved, re-attributed, or re-identified after the parse are reflected immediately, and results are emitted in document tree order. Disabled handling now covers controls within a `disabled` fieldset (excepting its first `legend` subtree, at any nesting level), and `select` values exclude disabled options and options under a disabled `optgroup`, default to the first available option when nothing is selected (never for `multiple`), and use an option's text when it has no `value` attribute.
+
 ## 1.23.2 (2026-Aug-26)
 
 ### Improvements

@@ -223,4 +223,133 @@ public class FormElementTest {
         assertEquals("one", keyVals.get(0).value());
         assertEquals("two", keyVals.get(1).value());
     }
+
+    @Test void controlWithFormAttributeIsOwnedById() {
+        // a control with a form attribute belongs to the form with that ID, even outside its subtree
+        String html = "<input id=a name=a value=1 form=f><form id=f><input id=b name=b value=2></form><input id=c name=c value=3 form=f>";
+        Document doc = Jsoup.parse(html);
+        FormElement form = (FormElement) doc.selectFirst("form");
+
+        List<Connection.KeyVal> data = form.formData();
+        assertEquals(3, data.size());
+        assertEquals("a=1", data.get(0).toString()); // document order, not descendant-then-linked order
+        assertEquals("b=2", data.get(1).toString());
+        assertEquals("c=3", data.get(2).toString());
+    }
+
+    @Test void controlWithMissingOrEmptyFormIdHasNoOwner() {
+        // an explicit form attribute pointing to a missing or empty ID does not fall back to an ancestor form
+        String html = "<form><input name=a value=1 form=missing><input name=b value=2 form><input name=c value=3 form=''></form>";
+        Document doc = Jsoup.parse(html);
+        FormElement form = (FormElement) doc.selectFirst("form");
+        assertTrue(form.formData().isEmpty());
+    }
+
+    @Test void controlWithDuplicateFormIdIsOwnedByFirstForm() {
+        String html = "<form id=f><input name=a value=1></form><form id=f></form><input name=b value=2 form=f>";
+        Document doc = Jsoup.parse(html);
+        List<FormElement> forms = doc.select("form").forms();
+
+        List<Connection.KeyVal> first = forms.get(0).formData();
+        assertEquals(2, first.size());
+        assertEquals("a=1", first.get(0).toString());
+        assertEquals("b=2", first.get(1).toString());
+        assertTrue(forms.get(1).formData().isEmpty());
+    }
+
+    @Test void ownershipReflectsDomChanges() {
+        String html = "<form id=f1><input name=a value=1></form><form id=f2></form>";
+        Document doc = Jsoup.parse(html);
+        List<FormElement> forms = doc.select("form").forms();
+        FormElement f1 = forms.get(0);
+        FormElement f2 = forms.get(1);
+        Element input = doc.selectFirst("input");
+
+        // moving a control to another form re-associates it
+        f2.appendChild(input);
+        assertTrue(f1.formData().isEmpty());
+        assertEquals("a=1", f2.formData().get(0).toString());
+
+        // moving a control out of any form disassociates it
+        doc.body().appendChild(input);
+        assertTrue(f2.formData().isEmpty());
+
+        // adding a form attribute associates by ID
+        input.attr("form", "f1");
+        assertEquals("a=1", f1.formData().get(0).toString());
+
+        // changing the form's ID drops the association
+        f1.attr("id", "f1-renamed");
+        assertTrue(f1.formData().isEmpty());
+
+        // removing the form attribute does not fall back to an ancestor form
+        f2.appendChild(input);
+        input.removeAttr("form");
+        assertEquals("a=1", f2.formData().get(0).toString());
+    }
+
+    @Test void disabledFieldsetDisablesControls() {
+        String html = "<form>" +
+            "<fieldset disabled><input name=a value=1><legend><input name=b value=2></legend></fieldset>" +
+            "<fieldset><input name=c value=3></fieldset>" +
+            "</form>";
+        Document doc = Jsoup.parse(html);
+        FormElement form = (FormElement) doc.selectFirst("form");
+
+        List<Connection.KeyVal> data = form.formData();
+        assertEquals(2, data.size());
+        assertEquals("b=2", data.get(0).toString()); // within the fieldset's first legend, so not disabled
+        assertEquals("c=3", data.get(1).toString());
+    }
+
+    @Test void nestedDisabledFieldsetDisablesControls() {
+        String html = "<form><fieldset disabled><legend><input name=a value=1></legend>" +
+            "<fieldset><input name=b value=2></fieldset></fieldset></form>";
+        Document doc = Jsoup.parse(html);
+        FormElement form = (FormElement) doc.selectFirst("form");
+
+        List<Connection.KeyVal> data = form.formData();
+        assertEquals(1, data.size());
+        assertEquals("a=1", data.get(0).toString()); // in the outer fieldset's first legend
+        // b is excluded: the outer disabled fieldset applies, and the inner fieldset is not within the legend
+    }
+
+    @Test void selectExcludesDisabledOptions() {
+        String html = "<form><select name=s>" +
+            "<option value=a selected>" +
+            "<option value=b selected disabled>" +
+            "<optgroup disabled><option value=c selected></optgroup>" +
+            "</select></form>";
+        Document doc = Jsoup.parse(html);
+        FormElement form = (FormElement) doc.selectFirst("form");
+
+        List<Connection.KeyVal> data = form.formData();
+        assertEquals(1, data.size());
+        assertEquals("s=a", data.get(0).toString());
+    }
+
+    @Test void selectDefaultsToFirstAvailableOption() {
+        String html = "<form><select name=s><option value=a disabled><option value=b><option value=c></select>" +
+            "<select name=m multiple><option value=x><option value=y></select>" +
+            "<select name=d disabled><option value=z></select></form>";
+        Document doc = Jsoup.parse(html);
+        FormElement form = (FormElement) doc.selectFirst("form");
+
+        List<Connection.KeyVal> data = form.formData();
+        assertEquals(1, data.size());
+        assertEquals("s=b", data.get(0).toString()); // first available (non-disabled) option
+        // m is multiple with nothing selected, so submits no values; d is disabled
+    }
+
+    @Test void optionWithoutValueUsesText() {
+        String html = "<form><select name=s><option>One</option><option value=two selected></select></form>";
+        Document doc = Jsoup.parse(html);
+        FormElement form = (FormElement) doc.selectFirst("form");
+        assertEquals("s=two", form.formData().get(0).toString());
+
+        doc.selectFirst("option").attr("selected", "");
+        List<Connection.KeyVal> data = form.formData();
+        assertEquals("s=One", data.get(0).toString()); // no value attribute, uses its text
+        assertEquals("s=two", data.get(1).toString());
+    }
 }

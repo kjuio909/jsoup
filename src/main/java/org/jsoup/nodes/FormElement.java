@@ -21,8 +21,9 @@ import java.util.List;
  */
 public class FormElement extends Element {
     private final Elements linkedEls = new Elements();
-    // contains form submittable elements that were linked during the parse (and due to parse rules, may no longer be a child of this form)
-    private static final Evaluator submittable = Selector.evaluatorOf(StringUtil.join(SharedConstants.FormSubmitTags, ", "));
+    // contains form listed elements that were linked to this form during the parse because they were not inserted as
+    // descendants of it (e.g. foster-parented out of a table), or that were explicitly added via addElement()
+    private static final Evaluator listed = Selector.evaluatorOf(StringUtil.join(SharedConstants.FormListedTags, ", "));
 
     /**
      * Create a new, standalone form element.
@@ -36,19 +37,57 @@ public class FormElement extends Element {
     }
 
     /**
-     * Get the list of form control elements associated with this form.
-     * @return form controls associated with this element.
+     * Get the list of form control elements associated with this form. The association is evaluated on each call, so
+     * controls added, moved, or re-attributed (including via the {@code form} attribute) after the parse are reflected.
+     * @return form controls associated with this element, in document order.
      */
     public Elements elements() {
-        // As elements may have been added or removed from the DOM after parse, prepare a new list that unions them:
-        Elements els = select(submittable); // current form children
-        for (Element linkedEl : linkedEls) {
-            if (linkedEl.ownerDocument() != null && !els.contains(linkedEl)) {
-                els.add(linkedEl); // adds previously linked elements, that weren't previously removed from the DOM
+        Document doc = ownerDocument();
+        if (doc == null) { // not in a document; only descendant and explicitly linked controls can be associated
+            Elements els = select(listed);
+            for (Element linkedEl : linkedEls) {
+                if (!els.contains(linkedEl)) els.add(linkedEl);
             }
+            return els;
         }
 
+        Elements els = new Elements();
+        for (Element el : doc.select(listed)) { // document tree order
+            if (owns(el)) els.add(el);
+        }
         return els;
+    }
+
+    /**
+     Checks if the given form listed element is associated with (owned by) this form. A control with a {@code form}
+     attribute belongs only to the first form in its document with that ID (even if not a descendant of it); an empty
+     or missing ID means no owner (there is no fallback to an ancestor form). Otherwise, the control belongs to its
+     nearest ancestor form, or, if it has none, to a form it was linked with during the parse (e.g. a control
+     foster-parented out of a table) or via {@link #addElement(Element)}.
+     */
+    private boolean owns(Element el) {
+        if (el.hasAttr("form")) {
+            String id = el.attr("form");
+            if (id.isEmpty()) return false;
+            Document doc = el.ownerDocument();
+            if (doc == null) return false;
+            for (Element candidate : doc.getElementsByAttributeValue("id", id)) {
+                if (candidate.nameIs("form"))
+                    return candidate == this; // first form in the document with this ID
+            }
+            return false;
+        }
+
+        // no form attribute: the control belongs to its nearest ancestor form, if any
+        Node parent = el.parent();
+        while (parent != null) {
+            if (parent.nameIs("form"))
+                return parent == this;
+            parent = parent.parent();
+        }
+
+        // not currently within any form; may have been linked during the parse or explicitly added
+        return linkedEls.contains(el);
     }
 
     /**
@@ -92,39 +131,29 @@ public class FormElement extends Element {
 
     /**
      * Get the data that this form submits. The returned list is a copy of the data, and changes to the contents of the
-     * list will not be reflected in the DOM.
+     * list will not be reflected in the DOM. Only successful controls are included: those with a name, that are not
+     * disabled (directly or via an ancestor fieldset), and that hold a submittable value.
      * @return a list of key vals
      */
     public List<Connection.KeyVal> formData() {
         ArrayList<Connection.KeyVal> data = new ArrayList<>();
 
         // iterate the form control elements and accumulate their values
-        Elements formEls = elements();
-        for (Element el: formEls) {
-            if (!el.tag().isFormSubmittable()) continue; // contents are form listable, superset of submitable
-            if (el.hasAttr("disabled")) continue; // skip disabled form inputs
+        for (Element el : elements()) {
+            if (!el.tag().isFormSubmittable()) continue; // contents are form listed, superset of submittable
             String name = el.attr("name");
             if (name.length() == 0) continue;
+            if (isDisabled(el)) continue; // skip disabled controls, including those within a disabled fieldset
             String type = el.attr("type");
 
             if (type.equalsIgnoreCase("button") || type.equalsIgnoreCase("image")) continue; // browsers don't submit these
 
             if (el.nameIs("select")) {
-                Elements options = el.select("option[selected]");
-                boolean set = false;
-                for (Element option: options) {
-                    data.add(HttpConnection.KeyVal.create(name, option.val()));
-                    set = true;
-                }
-                if (!set) {
-                    Element option = el.selectFirst("option");
-                    if (option != null)
-                        data.add(HttpConnection.KeyVal.create(name, option.val()));
-                }
+                appendSelectData(data, el, name);
             } else if ("checkbox".equalsIgnoreCase(type) || "radio".equalsIgnoreCase(type)) {
                 // only add checkbox or radio if they have the checked attribute
                 if (el.hasAttr("checked")) {
-                    final String val = el.val().length() >  0 ? el.val() : "on";
+                    final String val = el.val().length() > 0 ? el.val() : "on";
                     data.add(HttpConnection.KeyVal.create(name, val));
                 }
             } else {
@@ -132,6 +161,72 @@ public class FormElement extends Element {
             }
         }
         return data;
+    }
+
+    /**
+     A control is disabled if it has a {@code disabled} attribute, or is a descendant of a {@code disabled} fieldset
+     (at any nesting level), unless it is within that fieldset's first {@code legend} element child.
+     */
+    private static boolean isDisabled(Element el) {
+        if (el.hasAttr("disabled")) return true;
+        Element parent = el.parent();
+        while (parent != null) {
+            if (parent.nameIs("fieldset") && parent.hasAttr("disabled") && !isInFirstLegend(el, parent))
+                return true;
+            parent = parent.parent();
+        }
+        return false;
+    }
+
+    /** Checks if el is the first legend child of the fieldset, or a descendant of it. */
+    private static boolean isInFirstLegend(Element el, Element fieldset) {
+        Element legend = null;
+        for (Element child : fieldset.children()) {
+            if (child.nameIs("legend")) {
+                legend = child;
+                break;
+            }
+        }
+        if (legend == null) return false;
+        Node node = el;
+        while (node != null) {
+            if (node == legend) return true;
+            node = node.parent();
+        }
+        return false;
+    }
+
+    private static void appendSelectData(ArrayList<Connection.KeyVal> data, Element select, String name) {
+        Elements options = select.select("option");
+        boolean anySelected = false;
+        for (Element option : options) { // selected options, excluding disabled ones, in document order
+            if (option.hasAttr("selected")) {
+                anySelected = true;
+                if (!isDisabledOption(option))
+                    data.add(HttpConnection.KeyVal.create(name, optionValue(option)));
+            }
+        }
+        if (!anySelected && !select.hasAttr("multiple")) {
+            // no option was preselected; submit the first available option (a multiple select submits no values)
+            for (Element option : options) {
+                if (!isDisabledOption(option)) {
+                    data.add(HttpConnection.KeyVal.create(name, optionValue(option)));
+                    break;
+                }
+            }
+        }
+    }
+
+    /** An option is disabled if it has a {@code disabled} attribute, or is the child of a {@code disabled} optgroup. */
+    private static boolean isDisabledOption(Element option) {
+        if (option.hasAttr("disabled")) return true;
+        Element parent = option.parent();
+        return parent != null && parent.nameIs("optgroup") && parent.hasAttr("disabled");
+    }
+
+    /** The option's submitted value: its {@code value} attribute, or its text if no value attribute is set. */
+    private static String optionValue(Element option) {
+        return option.hasAttr("value") ? option.attr("value") : option.text();
     }
 
     @Override

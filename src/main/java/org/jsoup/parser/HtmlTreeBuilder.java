@@ -2,6 +2,7 @@ package org.jsoup.parser;
 
 import org.jsoup.helper.Validate;
 import org.jsoup.internal.Normalizer;
+import org.jsoup.internal.SharedConstants;
 import org.jsoup.internal.StringUtil;
 import org.jsoup.nodes.Attributes;
 import org.jsoup.nodes.CDataNode;
@@ -31,9 +32,7 @@ import static org.jsoup.parser.Parser.*;
 public class HtmlTreeBuilder extends TreeBuilder {
     static final String[] TagMathMlTextIntegration = new String[]{"mi", "mn", "mo", "ms", "mtext"};
     static final String[] TagSvgHtmlIntegration = new String[]{"desc", "foreignObject", "title"};
-    static final String[] TagFormListed = {
-        "button", "fieldset", "input", "keygen", "object", "output", "select", "textarea"
-    };
+    static final String[] TagFormListed = SharedConstants.FormListedTags;
 
     /** @deprecated Not used anymore; configure parser depth via {@link Parser#setMaxDepth(int)}. Will be removed in jsoup 1.24.1. */
     @Deprecated
@@ -459,9 +458,6 @@ public class HtmlTreeBuilder extends TreeBuilder {
     private void doInsertElement(Element el) {
         enforceStackDepthLimit();
 
-        if (formElement != null && el.tag().namespace.equals(NamespaceHtml) && StringUtil.inSorted(el.normalName(), TagFormListed))
-            formElement.addElement(el); // connect form controls to their form element
-
         // in HTML, the xmlns attribute if set must match what the parser set the tag's namespace to
         if (parser.getErrors().canAddError() && el.hasAttr("xmlns") && !el.attr("xmlns").equals(el.tag().namespace()))
             error("Invalid xmlns attribute [%s] on tag [%s]", el.attr("xmlns"), el.tagName());
@@ -472,7 +468,20 @@ public class HtmlTreeBuilder extends TreeBuilder {
         else
             target.appendChild(el);
 
+        if (formElement != null && el.tag().namespace.equals(NamespaceHtml) && StringUtil.inSorted(el.normalName(), TagFormListed)
+            && !isDescendantOf(el, formElement))
+            formElement.addElement(el); // connect form controls to their form element, when not inserted as a descendant (e.g. foster-parented out of a table)
+
         push(el);
+    }
+
+    private static boolean isDescendantOf(Node el, Node ancestor) {
+        Node node = el.parent();
+        while (node != null) {
+            if (node == ancestor) return true;
+            node = node.parent();
+        }
+        return false;
     }
 
     /** Inserts a comment into the current element, or the document when there is none. */
