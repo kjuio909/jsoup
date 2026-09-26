@@ -2039,4 +2039,56 @@ public class SelectorTest {
         assertTrue(threw);
     }
 
+    @Test void lang() {
+        Document doc = Jsoup.parse(
+            "<main id=m lang='en'><p id=a></p><div id=b lang='en-US'><span id=c></span></div><i id=d lang='ENough'></i><section id=e lang=''><b id=f></b></section></main>"
+        );
+
+        // own and inherited language; en-US is within en; an empty lang (e, and f by inheritance) is unknown
+        assertSelectedIds(doc.select(":lang(en)"), "m", "a", "b", "c");
+        assertSelectedIds(doc.select(":lang(en-US)"), "b", "c");
+        // ASCII case-insensitive equality, but "en" does not prefix-match "ENough" without a hyphen
+        assertSelectedIds(doc.select(":lang(enough)"), "d");
+
+        // quoted ranges, and whitespace just inside the parens, are equivalent to the bare form
+        assertSelectedIds(doc.select(":lang( 'en-US' )"), "b", "c");
+        assertSelectedIds(doc.select(":lang(\"EN-us\")"), "b", "c");
+
+        // combines with tag, attribute, combinator, :not, and :has selectors; document order, no duplicates
+        assertSelectedIds(doc.select(":lang(en):not(:lang(en-US))"), "m", "a");
+        assertSelectedIds(doc.select("main:has(:lang(en-US))"), "m");
+        assertSelectedIds(doc.select("div > span:lang(en)"), "c");
+        assertSelectedIds(doc.select("[id]:lang(en)"), "m", "a", "b", "c");
+        assertSelectedIds(doc.select(":lang(en), :lang(enough)"), "m", "a", "b", "c", "d");
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {
+        ":lang()",        // empty argument
+        ":lang( )",       // whitespace only
+        ":lang('')",      // empty quoted range
+        ":lang(en, fr)",  // comma list
+        ":lang(en us)",   // whitespace in a bare range
+        ":lang('en us')", // whitespace in a quoted range
+        ":lang('en)",     // unclosed quote
+        ":lang('en' x)",  // trailing content after a quoted range
+        ":lang(en",       // unclosed parens
+        ":lang(",         // unclosed parens, no content
+    })
+    void parseExceptionOnBadLang(String query) {
+        assertThrows(Selector.SelectorParseException.class, () -> Selector.evaluatorOf(query));
+    }
+
+    @Test void documentUnchangedAfterLangParseException() {
+        Document doc = Jsoup.parse("<main id=m lang='en'><p id=a></p></main>");
+        String html = doc.html();
+
+        for (String bad : new String[]{":lang(", ":lang()", ":lang(en, fr)", ":lang('en)"})
+            assertThrows(Selector.SelectorParseException.class, () -> doc.select(bad));
+
+        // the document is unchanged, and subsequent valid queries see the original content
+        assertEquals(html, doc.html());
+        assertSelectedIds(doc.select(":lang(en)"), "m", "a");
+    }
+
 }

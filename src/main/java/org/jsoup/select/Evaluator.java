@@ -945,6 +945,51 @@ public abstract class Evaluator {
     }
 
     /**
+     * Evaluator for matching elements by language, per the CSS {@code :lang()} pseudo-class. The element's language
+     * is taken from its own {@code lang} attribute, or the nearest inherited {@code lang} attribute up the parent
+     * chain. An empty {@code lang} value means the language is unknown and blocks further inheritance. A language
+     * range matches when the element's language is equal to it, or starts with it followed by a {@code -}; the
+     * comparison is ASCII case-insensitive.
+     * @see <a href="https://www.w3.org/TR/selectors-4/#the-lang-pseudo">:lang() selector</a>
+     */
+    public static final class Lang extends Evaluator {
+        private final String range;
+
+        public Lang(String range) {
+            this.range = range;
+        }
+
+        @Override
+        public boolean matches(Element root, Element element) {
+            String lang = null;
+            for (Element el = element; el != null; el = el.parent()) {
+                if (el.hasAttr("lang")) {
+                    lang = el.attr("lang");
+                    break; // an empty value means the language is unknown, and does not inherit further up
+                }
+            }
+            if (lang == null || lang.isEmpty()) return false;
+
+            final int len = range.length();
+            if (lang.length() < len) return false;
+            if (lang.length() > len && lang.charAt(len) != '-') return false; // must be equal, or range + "-..."
+            for (int i = 0; i < len; i++) {
+                if (asciiLower(lang.charAt(i)) != asciiLower(range.charAt(i))) return false;
+            }
+            return true;
+        }
+
+        private static char asciiLower(char c) {
+            return c >= 'A' && c <= 'Z' ? (char) (c + 32) : c;
+        }
+
+        @Override
+        public String toString() {
+            return ":lang(" + range + ")";
+        }
+    }
+
+    /**
      * Abstract evaluator for sibling index matching
      *
      * @author ant

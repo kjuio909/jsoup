@@ -228,6 +228,8 @@ public class QueryParser implements AutoCloseable {
                 return matchesWholeText(true);
             case "not":
                 return not();
+            case "lang":
+                return lang();
             case "nth-child":
                 return cssNthChild(false, false);
             case "nth-last-child":
@@ -648,6 +650,31 @@ public class QueryParser implements AutoCloseable {
         Validate.notEmpty(subQuery, ":not(selector) subselect must not be empty");
 
         return new StructuralEvaluator.Not(parse(subQuery));
+    }
+
+    // pseudo selector :lang(en), :lang("en-US")
+    private Evaluator lang() {
+        String arg = consumeParens().trim(); // whitespace just inside the parens is ignored
+        Validate.notEmpty(arg, ":lang() must have a language range");
+
+        final String range;
+        final char first = arg.charAt(0);
+        if (first == '\'' || first == '"') {
+            // a quoted range must close at the very end of the argument, with nothing after it
+            Validate.isTrue(arg.length() > 1 && arg.charAt(arg.length() - 1) == first,
+                ":lang() has an unclosed quote or trailing content after the language range");
+            range = arg.substring(1, arg.length() - 1);
+        } else {
+            range = arg;
+        }
+
+        Validate.notEmpty(range, ":lang() must have a language range");
+        for (int i = 0; i < range.length(); i++) {
+            char c = range.charAt(i);
+            Validate.isFalse(c == ',' || StringUtil.isWhitespace(c),
+                ":lang() language range must not contain whitespace or commas");
+        }
+        return new Evaluator.Lang(range);
     }
 
     @Override
