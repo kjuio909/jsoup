@@ -2,6 +2,7 @@ package org.jsoup.parser;
 
 import org.jsoup.helper.Validate;
 import org.jsoup.internal.Normalizer;
+import org.jsoup.internal.SharedConstants;
 import org.jsoup.internal.StringUtil;
 import org.jsoup.nodes.Attributes;
 import org.jsoup.nodes.CDataNode;
@@ -31,9 +32,7 @@ import static org.jsoup.parser.Parser.*;
 public class HtmlTreeBuilder extends TreeBuilder {
     static final String[] TagMathMlTextIntegration = new String[]{"mi", "mn", "mo", "ms", "mtext"};
     static final String[] TagSvgHtmlIntegration = new String[]{"desc", "foreignObject", "title"};
-    static final String[] TagFormListed = {
-        "button", "fieldset", "input", "keygen", "object", "output", "select", "textarea"
-    };
+    static final String[] TagFormListed = SharedConstants.FormListedTags;
 
     /** @deprecated Not used anymore; configure parser depth via {@link Parser#setMaxDepth(int)}. Will be removed in jsoup 1.24.1. */
     @Deprecated

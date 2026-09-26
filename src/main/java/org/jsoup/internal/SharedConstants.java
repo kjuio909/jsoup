@@ -21,6 +21,11 @@ public final class SharedConstants {
         "input", "keygen", "object", "select", "textarea"
     };
 
+    /** All form-listed elements (a superset of {@link #FormSubmitTags}). Kept sorted for binary search. */
+    public static final String[] FormListedTags = {
+        "button", "fieldset", "input", "keygen", "object", "output", "select", "textarea"
+    };
+
     public static final String DummyUri = "https://dummy.example/"; // used as a base URI if none provided, to allow abs url resolution to preserve relative links
 
     public static final String UseHttpClient = "jsoup.useHttpClient";

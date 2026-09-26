@@ -36,7 +36,7 @@ public class FormElementTest {
     }
 
     @Test public void createsFormData() {
-        String html = "<form><input name='one' value='two'><select name='three'><option value='not'>" +
+        String html = "<form><input name='one' value='two'><select name='three' multiple><option value='not'>" +
                 "<option value='four' selected><option value='five' selected><textarea name=six>seven</textarea>" +
                 "<input name='seven' type='radio' value='on' checked><input name='seven' type='radio' value='off'>" +
                 "<input name='eight' type='checkbox' checked><input name='nine' type='checkbox' value='unset'>" +
@@ -222,5 +222,161 @@ public class FormElementTest {
         List<Connection.KeyVal> keyVals = form.formData();
         assertEquals("one", keyVals.get(0).value());
         assertEquals("two", keyVals.get(1).value());
+    }
+
+    @Test public void formDataIncludesLinkedControlsInDocumentOrder() {
+        String html = "<input form=f1 name=one value=1>" +
+                "<form id=f1><input name=two value=2></form>" +
+                "<input form=f1 name=three value=3>";
+        Document doc = Jsoup.parse(html);
+        FormElement form = (FormElement) doc.selectFirst("form");
+
+        List<Connection.KeyVal> data = form.formData();
+        assertEquals(3, data.size());
+        assertEquals("one=1", data.get(0).toString());
+        assertEquals("two=2", data.get(1).toString());
+        assertEquals("three=3", data.get(2).toString());
+    }
+
+    @Test public void controlsLinkedByFormAttributeAfterParse() {
+        Document doc = Jsoup.parse("<form id=f1><input name=a value=1></form>");
+        doc.body().append("<input form=f1 name=b value=2>");
+        FormElement form = (FormElement) doc.selectFirst("form");
+
+        List<Connection.KeyVal> data = form.formData();
+        assertEquals(2, data.size());
+        assertEquals("a=1", data.get(0).toString());
+        assertEquals("b=2", data.get(1).toString());
+    }
+
+    @Test public void controlsAssociatedToOtherFormsAreExcluded() {
+        String html = "<form id=f1><input name=inner value=1><input name=other value=2 form=f2></form>" +
+                "<form id=f2></form>";
+        Document doc = Jsoup.parse(html);
+        FormElement f1 = (FormElement) doc.getElementById("f1");
+        FormElement f2 = (FormElement) doc.getElementById("f2");
+
+        List<Connection.KeyVal> data1 = f1.formData();
+        assertEquals(1, data1.size());
+        assertEquals("inner=1", data1.get(0).toString());
+
+        List<Connection.KeyVal> data2 = f2.formData();
+        assertEquals(1, data2.size());
+        assertEquals("other=2", data2.get(0).toString());
+    }
+
+    @Test public void controlWithInvalidFormReferenceIsExcluded() {
+        Document doc = Jsoup.parse("<form id=f1><input name=a value=1 form=nope></form>");
+        FormElement form = (FormElement) doc.selectFirst("form");
+        assertTrue(form.formData().isEmpty());
+    }
+
+    @Test public void controlReassociatedAfterParse() {
+        Document doc = Jsoup.parse("<form id=f1><input name=a value=1></form><form id=f2></form>");
+        FormElement f1 = (FormElement) doc.getElementById("f1");
+        FormElement f2 = (FormElement) doc.getElementById("f2");
+
+        doc.selectFirst("input").attr("form", "f2");
+        assertTrue(f1.formData().isEmpty());
+        List<Connection.KeyVal> data = f2.formData();
+        assertEquals(1, data.size());
+        assertEquals("a=1", data.get(0).toString());
+    }
+
+    @Test public void disabledFieldsetExcludesControlsExceptInFirstLegend() {
+        String html = "<form><fieldset disabled>" +
+                "<legend><input name=keep value=1></legend>" +
+                "<legend><input name=drop1 value=2></legend>" +
+                "<input name=drop2 value=3>" +
+                "</fieldset><input name=also value=4></form>";
+        Document doc = Jsoup.parse(html);
+        FormElement form = (FormElement) doc.selectFirst("form");
+
+        List<Connection.KeyVal> data = form.formData();
+        assertEquals(2, data.size());
+        assertEquals("keep=1", data.get(0).toString());
+        assertEquals("also=4", data.get(1).toString());
+    }
+
+    @Test public void disabledOptionsAreNotSubmitted() {
+        // the selected option is disabled, so fall back to the first enabled option
+        Document doc = Jsoup.parse("<form><select name=s><option value=a selected disabled><option value=b></select></form>");
+        FormElement form = (FormElement) doc.selectFirst("form");
+        List<Connection.KeyVal> data = form.formData();
+        assertEquals(1, data.size());
+        assertEquals("s=b", data.get(0).toString());
+    }
+
+    @Test public void singleSelectSubmitsOneOption() {
+        Document doc = Jsoup.parse("<form><select name=s><option value=a selected><option value=b selected></select></form>");
+        FormElement form = (FormElement) doc.selectFirst("form");
+        List<Connection.KeyVal> data = form.formData();
+        assertEquals(1, data.size());
+        assertEquals("s=a", data.get(0).toString());
+    }
+
+    @Test public void singleSelectFallsBackToFirstEnabledOption() {
+        Document doc = Jsoup.parse("<form><select name=s><option value=a disabled><option value=b></select></form>");
+        FormElement form = (FormElement) doc.selectFirst("form");
+        List<Connection.KeyVal> data = form.formData();
+        assertEquals(1, data.size());
+        assertEquals("s=b", data.get(0).toString());
+    }
+
+    @Test public void multipleSelectSubmitsAllEnabledSelectedOptions() {
+        Document doc = Jsoup.parse("<form><select name=s multiple><option value=a selected>" +
+                "<option value=b selected disabled><option value=c selected></select></form>");
+        FormElement form = (FormElement) doc.selectFirst("form");
+        List<Connection.KeyVal> data = form.formData();
+        assertEquals(2, data.size());
+        assertEquals("s=a", data.get(0).toString());
+        assertEquals("s=c", data.get(1).toString());
+    }
+
+    @Test public void multipleSelectWithNoSelectionSubmitsNothing() {
+        Document doc = Jsoup.parse("<form><select name=s multiple><option value=a><option value=b></select></form>");
+        FormElement form = (FormElement) doc.selectFirst("form");
+        assertTrue(form.formData().isEmpty());
+    }
+
+    @Test public void duplicateNamesPreservedInOrder() {
+        Document doc = Jsoup.parse("<form><input name=d value=1><input name=d value=2><input name=d value=3></form>");
+        FormElement form = (FormElement) doc.selectFirst("form");
+        List<Connection.KeyVal> data = form.formData();
+        assertEquals(3, data.size());
+        assertEquals("d=1", data.get(0).toString());
+        assertEquals("d=2", data.get(1).toString());
+        assertEquals("d=3", data.get(2).toString());
+    }
+
+    @Test public void formDataCallsAreIndependent() {
+        Document doc = Jsoup.parse("<form><input name=a value=1></form>");
+        FormElement form = (FormElement) doc.selectFirst("form");
+
+        List<Connection.KeyVal> first = form.formData();
+        assertEquals(1, first.size());
+        first.clear();
+
+        List<Connection.KeyVal> second = form.formData();
+        assertEquals(1, second.size());
+        assertEquals("a=1", second.get(0).toString());
+    }
+
+    @Test public void emptyFormData() {
+        Document doc = Jsoup.parse("<form></form>");
+        FormElement form = (FormElement) doc.selectFirst("form");
+        assertTrue(form.formData().isEmpty());
+        assertEquals(1, doc.select("form").size()); // document still queryable
+    }
+
+    @Test public void formDataDoesNotModifyDocument() {
+        String html = "<form id=f1><fieldset disabled><input name=a value=1></fieldset>" +
+                "<select name=s><option value=x selected></select></form>";
+        Document doc = Jsoup.parse(html);
+        String before = doc.html();
+        FormElement form = (FormElement) doc.selectFirst("form");
+        form.formData();
+        form.elements();
+        assertEquals(before, doc.html());
     }
 }
