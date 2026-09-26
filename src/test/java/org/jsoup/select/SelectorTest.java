@@ -1390,6 +1390,126 @@ public class SelectorTest {
         assertEquals("o", els.get(0).id());
     }
 
+    @Test void hasChildCombinatorIsDirectOnly() {
+        // :has(> x) must not match a descendant that is not a direct element child
+        Document doc = Jsoup.parse(
+            "<article id=1><div><img class=hero></div></article>" +
+            "<article id=2><img class=hero></article>");
+        assertSelectedIds(doc.select("article:has(> img.hero)"), "2");
+
+        // still chains below the child when asked
+        Document doc2 = Jsoup.parse(
+            "<div id=1><p><a></a></p></div>" +
+            "<div id=2><a></a></div>");
+        assertSelectedIds(doc2.select("div:has(> p > a)"), "1");
+
+        // a leading > then siblings must resolve those siblings inside the anchor, not outside it
+        Document doc3 = Jsoup.parse(
+            "<div id=1><p></p><span></span></div>" +
+            "<div id=2><p></p><b></b><span></span></div>");
+        assertSelectedIds(doc3.select("div:has(> p + span)"), "1");
+        assertSelectedIds(doc3.select("div:has(> p ~ span)"), "1", "2");
+    }
+
+    @Test void hasAdjacentSibling() {
+        Document doc = Jsoup.parse("<ul><li id=1>1</li><li class=selected>2</li><li id=3>3</li></ul>");
+        assertSelectedIds(doc.select("li:has(+ li.selected)"), "1");
+        // two positions away does not match adjacent
+        Document doc2 = Jsoup.parse("<div id=1></div><h></h><p></p>");
+        assertEquals(0, doc2.select("div:has(+ p)").size());
+        // non-element nodes do not take part in sibling relationships
+        Document doc3 = Jsoup.parse("<div id=1></div> text <p></p>");
+        assertSelectedIds(doc3.select("div:has(+ p)"), "1");
+    }
+
+    @Test void hasGeneralSibling() {
+        Document doc = Jsoup.parse(
+            "<p id=1>a</p><b>x</b><p class=notice>n</p><p id=3>c</p>");
+        assertSelectedIds(doc.select("p:has(~ p.notice)"), "1");
+        // preceding siblings are not considered
+        Document doc2 = Jsoup.parse("<p id=1></p><div id=2></div>");
+        assertEquals(0, doc2.select("div:has(~ p)").size());
+    }
+
+    @Test void hasSiblingChainDescends() {
+        // a leading sibling combinator may continue below the matched sibling
+        Document doc = Jsoup.parse("<div id=1></div><p><span id=s1></span></p>");
+        assertSelectedIds(doc.select("div:has(~ p span)"), "1");
+        assertSelectedIds(doc.select("div:has(~ p > span)"), "1");
+        assertSelectedIds(doc.select("div:has(+ p span)"), "1");
+
+        Document doc2 = Jsoup.parse("<div id=1></div><p></p><span></span>");
+        assertSelectedIds(doc2.select("div:has(+ p + span)"), "1");
+        assertSelectedIds(doc2.select("div:has(+ p ~ span)"), "1");
+
+        Document doc3 = Jsoup.parse("<div id=1></div><h></h><p><span></span></p>");
+        assertEquals(0, doc3.select("div:has(+ p span)").size());
+    }
+
+    @Test void hasDescendantCombinatorStaysInsideAnchor() {
+        // a non-leading sibling/descendant combinator must never reach outside the anchor element
+        Document doc = Jsoup.parse(
+            "<div id=outer><div id=inner><span>s</span></div></div><p></p><span>ext</span>");
+        assertEquals(0, doc.select("div:has(p ~ span)").size());
+
+        Document doc2 = Jsoup.parse("<div id=1><p></p><span>x</span></div>");
+        assertSelectedIds(doc2.select("div:has(p ~ span)"), "1");
+    }
+
+    @Test void hasBranchesEvaluatedIndependently() {
+        // a child-only branch must not be satisfied via a sibling branch, and vice versa
+        Document doc = Jsoup.parse(
+            "<article id=1><div><img class=hero></div></article>" +
+            "<article id=2><img class=hero></article>");
+        assertSelectedIds(doc.select("article:has(> img.hero)"), "2");
+        assertSelectedIds(doc.select("article:has(~ article)"), "1");
+        assertSelectedIds(doc.select("article:has(> img.hero, ~ article)"), "1", "2");
+
+        // comma branches within and outside :has dedupe and stay in document order
+        Document doc2 = Jsoup.parse(
+            "<div id=1><img class=hero><img class=thumb></div>" +
+            "<div id=2><img class=thumb></div>");
+        assertSelectedIds(doc2.select("div:has(> img.hero, > img.thumb)"), "1", "2");
+    }
+
+    @Test void hasRelativeNestedHas() {
+        Document doc = Jsoup.parse("<div id=1></div><p><span>x</span></p>");
+        assertSelectedIds(doc.select("div:has(~ p:has(span))"), "1");
+        Document doc2 = Jsoup.parse("<div id=1></div><p></p>");
+        assertEquals(0, doc2.select("div:has(~ p:has(span))").size());
+    }
+
+    @Test void hasRelativeReevaluatesAfterDomMutation() {
+        Document doc = Jsoup.parse("<div id=1></div><p class=x></p>");
+        String q = "div:has(+ p.x)";
+        assertSelectedIds(doc.select(q), "1");
+
+        doc.selectFirst("p").removeAttr("class");
+        assertEquals(0, doc.select(q).size());
+
+        doc.selectFirst("p").attr("class", "x");
+        assertSelectedIds(doc.select(q), "1");
+
+        doc.selectFirst("div").after("<h></h>"); // element now between them
+        assertEquals(0, doc.select(q).size());
+        assertSelectedIds(doc.select("div:has(~ p.x)"), "1");
+
+        // repeated calls on an unchanged tree are stable
+        Elements first = doc.select("div:has(~ p.x)");
+        Elements second = doc.select("div:has(~ p.x)");
+        assertEquals(first.outerHtml(), second.outerHtml());
+    }
+
+    @Test void hasRelativeSelectorErrors() {
+        String[] bad = {"div:has()", "div:has( )", "div:has(>)", "div:has(+ )", "div:has(~)",
+            "div:has(div", "div:has(:unknown)", "div:has(p +)", "div:has(,p)", "div:has(p >> p)"};
+        for (String q : bad) {
+            assertThrows(Selector.SelectorParseException.class,
+                () -> Jsoup.parse("<div><p></p></div>").select(q),
+                () -> "query should fail to parse: " + q);
+        }
+    }
+
     @Test void negativeNthChild() {
         // https://github.com/jhy/jsoup/issues/1147
         String html = "<p>1</p> <p>2</p> <p>3</p> <p>4</p>";
