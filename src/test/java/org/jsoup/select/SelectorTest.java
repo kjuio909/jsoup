@@ -1982,6 +1982,30 @@ public class SelectorTest {
         // ~= regex matching is unchanged
         assertSelectedIds(doc.select("body [data-v~=B]"), "a");
         assertSelectedIds(doc.select("body [data-v~=(?i)alpha]"), "f");
+
+        // whitespace is allowed around the ~= operator, and is not part of the pattern
+        assertSelectedIds(doc.select("body [data-v ~= B]"), "a");
+        assertSelectedIds(doc.select("body [data-v ~= (?i)alpha ]"), "f");
+
+        // bare values decode CSS escapes, matching their unescaped equivalents
+        assertSelectedIds(doc.select("body [data-v=\\41lpha]"), "f");
+        assertSelectedIds(doc.select("body [data-v=Al\\70ha]"), "f");
+        assertSelectedIds(doc.select("body [data-v=\\41]")); // "A" != "Alpha"
+    }
+
+    @Test void documentUnchangedAfterAttributeParseException() {
+        Document doc = Jsoup.parse(
+            "<a id=a data-v=\"A B\"></a><a id=b data-v=\"a b\"></a><i id=e></i>"
+        );
+        String html = doc.html();
+
+        for (String bad : new String[]{"[data-v='a'", "[data-v=", "[data-v=x\\ ]", "[data-v='a' i s]", "[data-v=1] ["})
+            assertThrows(Selector.SelectorParseException.class, () -> doc.select(bad));
+
+        // the document is unchanged, and subsequent valid queries see the original content
+        assertEquals(html, doc.html());
+        assertSelectedIds(doc.select("body [data-v]"), "a", "b");
+        assertSelectedIds(doc.select("body [data-v=\"A B\"]"), "a");
     }
 
     @ParameterizedTest
@@ -1995,6 +2019,8 @@ public class SelectorTest {
         "[data-v='a' i x]", // garbage after modifier
         "[data-v='a'",      // unclosed quote
         "[data-v=",         // unclosed attribute
+        "[data-v=x\\ ]",    // dangling escape in a bare value
+        "[data-v\\]",       // escape swallowing the closing bracket
     })
     void parseExceptionOnBadAttributeValue(String query) {
         assertThrows(Selector.SelectorParseException.class, () -> Selector.evaluatorOf(query));

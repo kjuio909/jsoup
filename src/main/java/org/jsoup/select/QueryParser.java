@@ -364,8 +364,8 @@ public class QueryParser implements AutoCloseable {
                 eval = new Evaluator.AttributeStarting("");
             else
                 eval = new Evaluator.Attribute(key);
-        } else if (cq.matchChomp("~=")) { // regex match; the remainder of the queue is the pattern, unmodified
-            eval = new Evaluator.AttributeWithValueMatching(key, Regex.compile(cq.remainder()));
+        } else if (cq.matchChomp("~=")) { // regex match; the remainder of the queue (less surrounding whitespace) is the pattern
+            eval = new Evaluator.AttributeWithValueMatching(key, Regex.compile(cq.remainder().trim()));
         } else {
             final String op;
             if (cq.matchChomp("!=")) op = "!=";
@@ -377,8 +377,11 @@ public class QueryParser implements AutoCloseable {
                 "Could not parse attribute query '%s': unexpected token at '%s'", query, cq.remainder());
 
             cq.consumeWhitespace();
-            final String value = consumeAttributeValue(cq);
-            final boolean quoted = !value.isEmpty() && (value.charAt(0) == '"' || value.charAt(0) == '\'');
+            final String rawValue = consumeAttributeValue(cq);
+            final boolean quoted = !rawValue.isEmpty() && (rawValue.charAt(0) == '"' || rawValue.charAt(0) == '\'');
+            // Quoted (CSS string) values keep their quotes and are decoded in the evaluator; bare values have their
+            // CSS escapes decoded here, so escaped and unescaped forms of the same value match equally.
+            final String value = quoted ? rawValue : TokenQueue.unescapeCss(rawValue);
             cq.consumeWhitespace();
 
             // Quoted (CSS string) values compare case-sensitively by default; bare values keep jsoup's historical
