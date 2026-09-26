@@ -1390,6 +1390,159 @@ public class SelectorTest {
         assertEquals("o", els.get(0).id());
     }
 
+    @Test void hasRelativeChildBranch() {
+        // :has(> sel) is confined to direct element children; a deeper match must not hit
+        Document doc = Jsoup.parse(
+            "<article id=a1><div><img class=hero></div></article>" +
+            "<article id=a2><img class=hero></article>" +
+            "<article id=a3><img></article>");
+        assertSelectedIds(doc.select("article:has(> img.hero)"), "a2");
+        // nested: every '>' edge stays a direct-child edge
+        Document doc2 = Jsoup.parse(
+            "<article id=a1><div><section><img class=hero></section></div></article>" +
+            "<article id=a2><div><img class=hero></div></article>");
+        assertSelectedIds(doc2.select("article:has(> div:has(> img.hero))"), "a2");
+    }
+
+    @Test void hasRelativeAdjacentSiblingBranch() {
+        // :has(+ sel) only matches when the immediate following ELEMENT sibling qualifies
+        Document doc = Jsoup.parse(
+            "<ul><li id=l1>x</li><li id=ly>y</li><li class=selected>z</li></ul>" +
+            "<ul><li id=l2>a</li><li>b</li><li class=other>c</li></ul>");
+        assertSelectedIds(doc.select("li:has(+ li.selected)"), "ly");
+        // a non-adjacent selected item (l1 -> ly -> selected) must not match l1
+        assertFalse(doc.select("#l1").is("li:has(+ li.selected)"));
+        // l2's immediate sibling is plain b, so it does not match
+        assertFalse(doc.select("#l2").is("li:has(+ li.selected)"));
+
+        // intervening text and comment nodes are not elements and do not break adjacency
+        Document doc2 = Jsoup.parse("<div><p id=1>a</p> txt <!--c--> <p class=x>b</p></div>");
+        assertSelectedIds(doc2.select("p:has(+ p.x)"), "1");
+    }
+
+    @Test void hasRelativeGeneralSiblingBranch() {
+        // :has(~ sel) allows intervening elements, unlike '+'
+        Document doc = Jsoup.parse(
+            "<div><p id=p1>a</p><h2>h</h2><p class=notice>n</p></div>" +
+            "<div><p id=p2>a</p><p>mid</p></div>");
+        assertSelectedIds(doc.select("p:has(~ p.notice)"), "p1");
+
+        // text/comment nodes are not element siblings
+        Document doc2 = Jsoup.parse("<div><p id=1>a</p><!-- c --><p class=notice>n</p></div>");
+        assertSelectedIds(doc2.select("p:has(~ p.notice)"), "1");
+    }
+
+    @Test void hasSiblingBranchChainsCombinators() {
+        // a leading sibling edge may chain into the sibling's subtree
+        Document doc = Jsoup.parse(
+            "<article id=a1></article><article><div><img class=hero></div></article>" +
+            "<article id=a2></article><article><img class=hero></article>");
+        assertSelectedIds(doc.select("article:has(+ article > img.hero)"), "a2");
+
+        // adjacency of the leading '+' still holds despite the subtree search
+        Document adjacent = Jsoup.parse("<div id=x></div><section><p></p></section>");
+        assertSelectedIds(adjacent.select("div:has(+ section p)"), "x");
+        Document separated = Jsoup.parse("<div id=x></div><h1></h1><section><p></p></section>");
+        assertTrue(separated.select("div:has(+ section p)").isEmpty());
+
+        // chained sibling combinator reaches a later sibling from the immediate sibling
+        assertSelectedIds(Jsoup.parse("<div id=a></div><p></p><img>").select("div:has(+ p + img)"), "a");
+        assertTrue(Jsoup.parse("<div id=a></div><p></p><h2></h2><img>").select("div:has(+ p + img)").isEmpty());
+        assertSelectedIds(Jsoup.parse("<div id=a></div><p></p><h2></h2><img>").select("div:has(+ p ~ img)"), "a");
+    }
+
+    @Test void hasBranchAnchorDoesNotDrift() {
+        // an internal (non-leading) combinator stays within the anchor's subtree; it must never reach the
+        // anchor's own preceding/following siblings
+        assertTrue(Jsoup.parse("<span></span><div id=x></div><span></span><a></a>")
+            .select("div:has(span + a)").isEmpty());
+        assertTrue(Jsoup.parse("<div id=x></div><p></p><em></em><p class=notice></p>")
+            .select("div:has(p ~ p.notice)").isEmpty());
+        // and still works when genuinely contained
+        assertSelectedIds(Jsoup.parse("<div id=ok><span></span><a></a></div><span></span><div id=bad></div><a></a>")
+            .select("div:has(span + a)"), "ok");
+    }
+
+    @Test void hasMixedRelativeBranches() {
+        // descendant, child and sibling branches OR together; each element is reported once, in document order
+        Document doc = Jsoup.parse(
+            "<div id=a><i></i></div>" +
+            "<div id=b></div>" +
+            "<div id=c><p><i></i></p></div>");
+        assertSelectedIds(doc.select("div:has(> i, + div)"), "a", "b");
+
+        Document doc2 = Jsoup.parse(
+            "<div id=a></div><p></p>" +
+            "<div id=b></div><h></h><p></p>");
+        assertSelectedIds(doc2.select("div:has(+ p, ~ p)"), "a", "b");
+    }
+
+    @Test void hasRelativeBranchesNestAndCombine() {
+        Document doc = Jsoup.parse(
+            "<section id=s1><article id=a1></article><h2></h2></section>" +
+            "<section id=s2><article id=a2><span></span></article></section>");
+        assertSelectedIds(doc.select("section:has(article:has(+ h2))"), "s1");
+
+        Document doc2 = Jsoup.parse(
+            "<div class=foo id=a></div><p></p>" +
+            "<div class=bar id=b></div><p></p>");
+        assertSelectedIds(doc2.select("div.foo:has(+ p)"), "a");
+    }
+
+    @Test void hasSiblingBranchWithSelfContainedPseudos() {
+        // :is(), :not() and a nested :has() predicate the sibling element itself (they do not move the final
+        // match target into the sibling's subtree), so the immediate/general sibling is tested directly
+        assertSelectedIds(Jsoup.parse("<div id=a></div><p class=x></p>").select("div:has(+ :is(p.x, a))"), "a");
+        assertSelectedIds(Jsoup.parse("<div id=a></div><p><i></i></p>").select("div:has(+ p:has(i))"), "a");
+        assertTrue(Jsoup.parse("<div id=a></div><p><b></b></p>").select("div:has(+ p:has(i))").isEmpty());
+        assertSelectedIds(Jsoup.parse("<div id=a></div><p class=y></p>").select("div:has(+ p:not(.x))"), "a");
+        assertTrue(Jsoup.parse("<div id=a></div><p class=x></p>").select("div:has(+ p:not(.x))").isEmpty());
+        // type, class and attribute all apply to the sibling element
+        assertSelectedIds(Jsoup.parse("<ul><li id=a></li><li class=selected data-x>b</li></ul>")
+            .select("li:has(+ li.selected[data-x])"), "a");
+    }
+
+    @Test void hasReevaluatesOnDomMutation() {
+        Document doc = Jsoup.parse("<div id=d><section><img class=hero></section></div>");
+
+        // not a direct child initially
+        assertTrue(doc.select("div:has(> img.hero)").isEmpty());
+        // adding deeper does not change that
+        doc.selectFirst("section").appendElement("img").attr("class", "hero");
+        assertTrue(doc.select("div:has(> img.hero)").isEmpty());
+        // moving the img to be a direct child re-evaluates against the current tree (no stale results)
+        Element img = doc.selectFirst("img.hero");
+        assertNotNull(img);
+        img.remove();
+        doc.selectFirst("div").appendChild(img);
+        assertSelectedIds(doc.select("div:has(> img.hero)"), "d");
+        // repeated calls over an unchanged tree are stable
+        assertSelectedIds(doc.select("div:has(> img.hero)"), "d");
+
+        // sibling axis likewise reflects add/remove live
+        Document sibs = Jsoup.parse("<div id=d></div>");
+        sibs.selectFirst("div").after("<h1></h1>");
+        assertSelectedIds(sibs.select("div:has(+ h1)"), "d");
+        sibs.selectFirst("h1").remove();
+        assertTrue(sibs.select("div:has(+ h1)").isEmpty());
+
+        // and a compiled Evaluator reused after mutation is not cached
+        Evaluator eval = QueryParser.parse("div:has(> section)");
+        Document compiled = Jsoup.parse("<div id=x><section></section></div>");
+        assertSelectedIds(Collector.collect(eval, compiled), "x");
+        compiled.selectFirst("section").remove();
+        assertTrue(Collector.collect(eval, compiled).isEmpty());
+    }
+
+    @Test void hasRelativeBranchErrors() {
+        // empty branches, dangling combinators, unclosed parens and unknown pseudos must fail to parse
+        for (String q : new String[]{":has()", "div:has(>)", "div:has(> )", "div:has(+ )", "div:has( ~ )",
+            "div:has(,)", "div:has(p >)", "div:has(> p,)", "div:has(p, +)", "div:has(p"}) {
+            assertThrows(Selector.SelectorParseException.class, () -> QueryParser.parse(q), () -> "should fail: " + q);
+        }
+        assertThrows(Selector.SelectorParseException.class, () -> Jsoup.parse("<x>").select("div:has(:bogus)"));
+    }
+
     @Test void negativeNthChild() {
         // https://github.com/jhy/jsoup/issues/1147
         String html = "<p>1</p> <p>2</p> <p>3</p> <p>4</p>";

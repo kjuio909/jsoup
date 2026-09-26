@@ -72,36 +72,106 @@ abstract class StructuralEvaluator extends Evaluator {
         }
     }
 
+    /**
+     * Implements the {@code :has(relative-selector-list)} structural pseudo-class. The current candidate element is the
+     * <b>anchor</b>; each comma-separated branch is evaluated <i>relative to that anchor</i>, and the anchor never
+     * drifts to its own ancestors or siblings while a branch is tested:
+     * <ul>
+     *   <li>a branch with no leading combinator matches only within the anchor's descendants;</li>
+     *   <li>a branch beginning with {@code >} (encoded as an {@link ImmediateParentRun} from the synthetic {@link Root})
+     *       is confined to direct element children and below;</li>
+     *   <li>a branch beginning with {@code +} or {@code ~} (an immediate/general sibling evaluator whose left side is
+     *       the synthetic {@link Root}) is evaluated against the anchor's following element siblings and their
+     *       descendants only; non-element nodes never act as siblings.</li>
+     * </ul>
+     * The parsed evaluator tree is left intact; the axis of each branch is derived from whether its leading combinator
+     * references the synthetic {@link Root}. Branches are ORed here, but the collector de-duplicates and orders results.
+     */
     static class Has extends StructuralEvaluator {
         static final SoftPool<NodeIterator<Node>> NodeIterPool =
             new SoftPool<>(() -> new NodeIterator<>(new TextNode(""), Node.class));
         // the element here is just a placeholder so this can be final - gets set in restart()
 
-        private final boolean checkSiblings; // evaluating against siblings (or children)
+        private final Evaluator[] branches; // each comma-separated relative branch
+        private final char[] axes;          // axis per branch: 0 = descendants, '+' / '~' = following element siblings
+        private final boolean[] deep;       // sibling branches that chain a further combinator and so must search subtrees
 
         public Has(Evaluator evaluator) {
             super(evaluator);
-            checkSiblings = evalWantsSiblings(evaluator);
+
+            ArrayList<Evaluator> clauses = new ArrayList<>();
+            if (evaluator instanceof CombiningEvaluator.Or) {
+                clauses.addAll(((CombiningEvaluator.Or) evaluator).evaluators);
+            } else {
+                clauses.add(evaluator);
+            }
+            branches = clauses.toArray(new Evaluator[0]);
+            axes = new char[branches.length];
+            deep = new boolean[branches.length];
+            for (int i = 0; i < branches.length; i++) {
+                axes[i] = siblingAxis(branches[i]);
+                deep[i] = axes[i] != 0 && hasChainedCombinator(branches[i]);
+            }
         }
 
         @Override public boolean matches(Element root, Element element) {
-            if (checkSiblings) { // evaluating against siblings
-                for (Element sib = element.firstElementSibling(); sib != null; sib = sib.nextElementSibling()) {
-                    if (sib != element && evaluator.matches(element, sib)) { // don't match against self
-                        return true;
-                    }
+            for (int i = 0; i < branches.length; i++) {
+                Evaluator branch = branches[i];
+                if (axes[i] == 0) {
+                    if (matchesDescendants(element, branch)) return true;
+                } else {
+                    if (matchesFollowingSiblings(element, axes[i], deep[i], branch)) return true;
                 }
             }
-            // otherwise we only want to match children (or below), and not the input element. And we want to minimize GCs so reusing the Iterator obj
+            return false;
+        }
+
+        /** Match a descendant-only branch (bare or {@code >}) within the anchor, never against the anchor itself. */
+        private static boolean matchesDescendants(Element anchor, Evaluator branch) {
             NodeIterator<Node> it = NodeIterPool.borrow();
-            it.restart(element);
+            it.restart(anchor);
             try {
                 while (it.hasNext()) {
                     Node node = it.next();
-                    if (node == element) continue; // don't match self, only descendants
-                    if (evaluator.matches(element, node)) {
-                        return true;
+                    if (node == anchor) continue; // don't match self, only descendants
+                    if (branch.matches(anchor, node)) return true;
+                }
+            } finally {
+                NodeIterPool.release(it);
+            }
+            return false;
+        }
+
+        /**
+         * Match a {@code +}/{@code ~} branch against following element siblings (element nodes only). The anchor is
+         * supplied as the matching root, so the branch's leading sibling edge (whose left side is the synthetic Root)
+         * resolves to the anchor: {@code +} is satisfied only by the immediate sibling, {@code ~} by any later one.
+         * A simple branch ({@code + p.selected}) tests the sibling elements directly, with {@code +} stopping after the
+         * first. A branch that chains further combinators ({@code + article > img}, {@code + p + img}, {@code ~ p span})
+         * may match within a sibling's subtree, or -- with chained sibling combinators -- in a later sibling, so every
+         * following sibling and its subtree is searched; the root-scoped structural evaluators enforce the exact
+         * adjacency and never walk above the anchor, so the broader search domain cannot mis-match.
+         */
+        private static boolean matchesFollowingSiblings(Element anchor, char axis, boolean deep, Evaluator branch) {
+            Element sibling = anchor.nextElementSibling();
+            if (!deep) {
+                while (sibling != null) {
+                    if (branch.matches(anchor, sibling)) return true;
+                    if (axis == '+') break; // '+' is the immediate sibling only; '~' may reach a later one
+                    sibling = sibling.nextElementSibling();
+                }
+                return false;
+            }
+
+            NodeIterator<Node> it = NodeIterPool.borrow();
+            try {
+                while (sibling != null) {
+                    it.restart(sibling);
+                    while (it.hasNext()) {
+                        Node node = it.next();
+                        if (branch.matches(anchor, node)) return true;
                     }
+                    sibling = sibling.nextElementSibling();
                 }
             } finally {
                 NodeIterPool.release(it);
@@ -114,16 +184,55 @@ abstract class StructuralEvaluator extends Evaluator {
             return false; // unused; :has(::comment)) goes via implicit root combinator
         }
 
-        /* Test if the :has sub-clause wants sibling elements (vs nested elements) - will be a Combining eval */
-        private static boolean evalWantsSiblings(Evaluator eval) {
-            if (eval instanceof CombiningEvaluator) {
-                CombiningEvaluator ce = (CombiningEvaluator) eval;
-                for (Evaluator innerEval : ce.evaluators) {
-                    if (innerEval instanceof PreviousSibling || innerEval instanceof ImmediatePreviousSibling)
-                        return true;
+        /**
+         * Determine a branch's leading sibling axis, if any, by tracing its left-most combinator edge. Only a leading
+         * {@code +} or {@code ~} is compiled against the synthetic {@link Root} (the anchor): it appears as an
+         * immediate/general sibling evaluator wrapping {@link Root} at the start of the chain (possibly beneath
+         * descendant and child edges). An internal sibling combinator references a real selector, not {@link Root},
+         * and so is scoped to the anchor's descendants rather than the anchor's own siblings.
+         * @return {@code '+'}, {@code '~'}, or {@code 0} for a descendant-only branch
+         */
+        private static char siblingAxis(Evaluator branch) {
+            Evaluator edge = branch;
+            while (true) {
+                if (edge instanceof CombiningEvaluator.And) {
+                    // the parser places the left-hand structural wrapper (Ancestor/sibling) first in the And
+                    edge = ((CombiningEvaluator.And) edge).evaluators.get(0);
+                } else if (edge instanceof ImmediateParentRun) {
+                    edge = ((ImmediateParentRun) edge).evaluators.get(0);
+                } else if (edge instanceof Ancestor) {
+                    edge = ((Ancestor) edge).evaluator;
+                } else if (edge instanceof ImmediatePreviousSibling) {
+                    Evaluator left = ((StructuralEvaluator) edge).evaluator;
+                    if (left instanceof Root) return '+';
+                    edge = left; // a chained sibling combinator; continue to the left-most edge
+                } else if (edge instanceof PreviousSibling) {
+                    Evaluator left = ((StructuralEvaluator) edge).evaluator;
+                    if (left instanceof Root) return '~';
+                    edge = left;
+                } else {
+                    return 0; // bare branch, or a leading '>' (a Root)
                 }
             }
-            return false;
+        }
+
+        /**
+         * Whether a sibling branch chains a further combinator after its leading {@code +}/{@code ~}, such that the
+         * match target may lie within a sibling's subtree (e.g. {@code + article > img}) rather than being the sibling
+         * element itself (e.g. {@code + p.selected}). The leading sibling-of-{@link Root} edge is the axis edge and is
+         * not counted; {@link Is}, {@link Not} and nested {@link Has} evaluate their own contents and are self-contained.
+         */
+        private static boolean hasChainedCombinator(Evaluator eval) {
+            if (eval instanceof Ancestor) return true;
+            if (eval instanceof ImmediateParentRun) return ((ImmediateParentRun) eval).evaluators.size() > 1;
+            if (eval instanceof ImmediatePreviousSibling || eval instanceof PreviousSibling)
+                return !(((StructuralEvaluator) eval).evaluator instanceof Root); // the leading axis edge wraps Root
+            if (eval instanceof CombiningEvaluator) {
+                for (Evaluator child : ((CombiningEvaluator) eval).evaluators) {
+                    if (hasChainedCombinator(child)) return true;
+                }
+            }
+            return false; // a plain simple sequence, or a self-contained evaluator (Is, Not, nested Has, etc.)
         }
 
         @Override protected int cost() {

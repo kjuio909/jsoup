@@ -114,6 +114,11 @@ public class QueryParser implements AutoCloseable {
                 break;
 
             if (combinator != 0) {
+                tq.consumeWhitespace();
+                if (tq.matchesAny(Combinators) || tq.matchesAny(SequenceEnders) || tq.isEmpty())
+                    // a dangling combinator (e.g. "div >", ":has(>)", or ":has(p, +)") is not a valid selector
+                    throw new Selector.SelectorParseException(
+                        "Could not parse query '%s': unexpected token at '%s'", query, tq.remainder());
                 Evaluator right = parseSimpleSequence();
                 left = combinator(left, combinator, right);
             } else {
