@@ -12,6 +12,7 @@ import org.jsoup.nodes.DocumentType;
 import org.jsoup.nodes.Element;
 import org.jsoup.nodes.LeafNode;
 import org.jsoup.nodes.Node;
+import org.jsoup.nodes.ProcessingInstruction;
 import org.jsoup.nodes.Range;
 import org.jsoup.nodes.TextNode;
 import org.jsoup.nodes.XmlDeclaration;
@@ -353,8 +354,21 @@ class PositionTest {
 
         Document multiline = Jsoup.parse("One\n<?xml", TrackingHtmlParser);
         assertEquals("2,6:9-2,6:9", multiline.endSourceRange().toString());
-        Comment comment = multiline.nodeStream(Comment.class).findFirst().orElseThrow(() -> new AssertionError("comment missing"));
-        assertEquals("2,1:4-2,6:9", comment.sourceRange().toString());
+    }
+
+    @Test void tracksProcessingInstructionAttributeRanges() {
+        String xml = "<root>\n<?target One='1' two=2?>\n</root>";
+        Document xmlDoc = Jsoup.parse(xml, TrackingXmlParser);
+        ProcessingInstruction xmlInstruction = xmlDoc.nodeStream(ProcessingInstruction.class).findFirst()
+            .orElseThrow(() -> new AssertionError("processing instruction missing"));
+        assertEquals("2,1:7-2,25:31", xmlInstruction.sourceRange().toString());
+        assertEquals("2,10:16-2,13:19=2,15:21-2,16:22", xmlInstruction.attributes().sourceRange("One").toString());
+        assertEquals("2,18:24-2,21:27=2,22:28-2,23:29", xmlInstruction.attributes().sourceRange("two").toString());
+        assertEquals("2,1:7-2,25:31", xmlInstruction.sourceRange().toString());
+
+        xmlInstruction.data("fresh='3'");
+        assertFalse(xmlInstruction.attributes().sourceRange("fresh").isTracked());
+        assertEquals("2,1:7-2,25:31", xmlInstruction.sourceRange().toString());
     }
 
     private static void assertRangeWithinSource(Range range, String source) {

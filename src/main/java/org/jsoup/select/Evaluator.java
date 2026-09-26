@@ -7,6 +7,7 @@ import org.jsoup.nodes.DocumentType;
 import org.jsoup.nodes.Element;
 import org.jsoup.nodes.LeafNode;
 import org.jsoup.nodes.Node;
+import org.jsoup.nodes.ProcessingInstruction;
 import org.jsoup.nodes.TextNode;
 import org.jsoup.nodes.XmlDeclaration;
 import org.jsoup.parser.ParseSettings;
@@ -833,7 +834,8 @@ public abstract class Evaluator {
                 if (n instanceof TextNode) {
                     if (!((TextNode) n).isBlank())
                         return false; // non-blank text: not empty
-                } else if (!(n instanceof Comment || n instanceof XmlDeclaration || n instanceof DocumentType))
+                } else if (!(n instanceof Comment || n instanceof ProcessingInstruction ||
+                    n instanceof XmlDeclaration || n instanceof DocumentType))
                     return false; // non "blank" element: not empty
             }
             return true;
