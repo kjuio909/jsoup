@@ -890,6 +890,44 @@ public abstract class Evaluator {
     	}
     }
 
+    /**
+     * Evaluator for the css language pseudo-class {@code :lang(R)}. The element's own {@code lang} attribute is checked
+     * first; if absent, the nearest ancestor carrying a {@code lang} attribute is used (up to the document root). An
+     * attribute that is present but empty means the language is unknown and stops further inheritance. The element's
+     * language matches if it equals the range R, or starts with R followed by a hyphen. The comparison is ASCII
+     * case-insensitive, so {@code :lang(en)} matches {@code en} and {@code en-US} but not {@code enough}.
+     * @see <a href="https://www.w3.org/TR/selectors-4/#lang-pseudo">:lang() pseudo-class</a>
+     */
+    public static final class IsLang extends Evaluator {
+        private final String lang;
+
+        public IsLang(String lang) {
+            this.lang = lowerCase(lang);
+        }
+
+        @Override
+        public boolean matches(Element root, Element element) {
+            Element current = element;
+            while (current != null) {
+                if (current.hasAttr("lang")) {
+                    String value = lowerCase(current.attr("lang"));
+                    return value.equals(lang) || value.startsWith(lang + "-");
+                }
+                current = current.parent();
+            }
+            return false;
+        }
+
+        @Override protected int cost() {
+            return 6; // may walk the parent chain
+        }
+
+        @Override
+        public String toString() {
+            return String.format(":lang(%s)", lang);
+        }
+    }
+
     public static final class IsOnlyChild extends Evaluator {
 		@Override
 		public boolean matches(Element root, Element element) {

@@ -228,6 +228,8 @@ public class QueryParser implements AutoCloseable {
                 return matchesWholeText(true);
             case "not":
                 return not();
+            case "lang":
+                return lang();
             case "nth-child":
                 return cssNthChild(false, false);
             case "nth-last-child":
@@ -648,6 +650,37 @@ public class QueryParser implements AutoCloseable {
         Validate.notEmpty(subQuery, ":not(selector) subselect must not be empty");
 
         return new StructuralEvaluator.Not(parse(subQuery));
+    }
+
+    // :lang(R): R is a bare or quoted language range; whitespace at either end of the parens is allowed, but the
+    // range itself must be non-empty and contain no whitespace or commas. (Quotes, if present, must be balanced.)
+    private Evaluator lang() {
+        String arg = consumeParens().trim(); // throws if the parens (or an inner quote) are not balanced
+        Validate.notEmpty(arg, ":lang(?) must have a language range");
+        Validate.isFalse(arg.indexOf(',') > -1, ":lang() does not support a comma-separated language list");
+
+        final String lang;
+        char first = arg.charAt(0);
+        if (first == '"' || first == '\'') {
+            int len = arg.length();
+            Validate.isTrue(len > 1 && arg.charAt(len - 1) == first,
+                "Could not parse query '" + query + "': :lang() quoted range must have a closing quote");
+            String value = arg.substring(1, len - 1);
+            Validate.notEmpty(value, ":lang(?) must have a language range");
+            Validate.isFalse(containsWhitespace(value), ":lang() range must not contain whitespace");
+            lang = TokenQueue.unescapeCss(value);
+        } else {
+            Validate.isFalse(containsWhitespace(arg), ":lang() range must not contain whitespace");
+            lang = TokenQueue.unescapeCss(arg);
+        }
+        return new Evaluator.IsLang(lang);
+    }
+
+    private static boolean containsWhitespace(String s) {
+        for (int i = 0; i < s.length(); i++) {
+            if (StringUtil.isWhitespace(s.charAt(i))) return true;
+        }
+        return false;
     }
 
     @Override

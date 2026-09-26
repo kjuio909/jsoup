@@ -1030,6 +1030,58 @@ public class SelectorTest {
         assertEquals("1", el1.first().id());
     }
 
+    /** Elements identified by tag name, plus #id when they have one, in document order. */
+    private static void assertSelectedNamed(Elements els, String... names) {
+        assertNotNull(els);
+        assertEquals(names.length, els.size(), "Incorrect number of selected elements");
+        for (int i = 0; i < names.length; i++) {
+            Element el = els.get(i);
+            assertEquals(names[i], el.tagName() + (el.id().isEmpty() ? "" : "#" + el.id()), "Incorrect element at index");
+        }
+    }
+
+    @Test public void lang() {
+        Document doc = Jsoup.parse(
+            "<main lang='en'><p id=a></p><div id=b lang='en-US'><span id=c></span></div>" +
+            "<i id=d lang='ENough'></i><section id=e lang=''><b id=f></b></section></main>");
+
+        assertSelectedNamed(doc.select(":lang(en)"), "main", "p#a", "div#b", "span#c"); // document order, no dupes
+        assertSelectedIds(doc.select(":lang(en-US)"), "b", "c");
+        assertSelectedIds(doc.select(":lang(enough)"), "d");
+        assertSelectedNamed(doc.select(":lang(EN)"), "main", "p#a", "div#b", "span#c"); // ASCII case-insensitive range
+        assertSelectedNamed(doc.select(":lang( 'en' )"), "main", "p#a", "div#b", "span#c"); // quoted, with outer whitespace
+        assertSelectedIds(doc.select(":lang(\"en-US\")"), "b", "c");
+
+        // compound: type, attribute, combinators, negation, relative existence
+        assertSelectedIds(doc.select("p[id]:lang(en)"), "a");
+        assertSelectedIds(doc.select("div:lang(en) > span"), "c");
+        assertSelectedNamed(doc.select(":not(:lang(en-US)):lang(en)"), "main", "p#a");
+        assertSelectedNamed(doc.select("main:has(:lang(en-US))"), "main");
+        assertSelectedIds(doc.select(":is(p, span):lang(en-US)"), "c");
+
+        // an empty lang attribute means unknown, and blocks inheritance for its subtree
+        assertSelectedIds(doc.select("section:lang(en)"));
+        assertSelectedIds(doc.select("b:lang(en)"));
+        assertThrows(Selector.SelectorParseException.class, () -> doc.select(":lang('')")); // empty range is invalid
+    }
+
+    @Test public void langInheritsAndPrefixes() {
+        Document doc = Jsoup.parse("<div lang='zh-Hant-HK'><p id=1><span id=2></span></p><i id=3 lang='zh'></i></div>");
+        Elements zh = doc.select(":lang(zh)"); // the carrying div itself matches, plus its inheriting subtree
+        assertEquals(4, zh.size());
+        assertEquals("div", zh.get(0).tagName());
+        assertSelectedNamed(doc.select(":lang(zh-Hant)"), "div", "p#1", "span#2");
+        assertSelectedIds(doc.select("p:lang(zh-Hant)"), "1");
+        assertSelectedIds(doc.select("span:lang(zh-hant-hk)"), "2");
+        // a similar prefix without a hyphen boundary is not a match: zh-Hant-HK vs zh-HK
+        assertSelectedIds(doc.select(":lang(zh-HK)"));
+    }
+
+    @Test public void langWithoutAncestorDoesNotMatch() {
+        Document doc = Jsoup.parse("<div id=1><p id=2></p></div>");
+        assertSelectedIds(doc.select(":lang(en)"));
+    }
+
     @Test public void handlesCommasInSelector() {
         Document doc = Jsoup.parse("<p name='1,2'>One</p><div>Two</div><ol><li>123</li><li>Text</li></ol>");
 

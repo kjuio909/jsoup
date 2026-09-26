@@ -4,6 +4,8 @@ import org.jsoup.Jsoup;
 import org.jsoup.nodes.Document;
 import org.jsoup.nodes.Element;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import static org.jsoup.select.EvaluatorDebug.asElement;
 import static org.jsoup.select.EvaluatorDebug.sexpr;
@@ -179,6 +181,43 @@ public class QueryParserTest {
         String before = doc.toString();
         assertThrows(SelectorParseException.class, () -> doc.select("#s>:nth-child(2 of b,"));
         assertEquals(before, doc.toString());
+    }
+
+    @Test
+    public void langParsesBareAndQuoted() {
+        assertEquals(":lang(en)", QueryParser.parse(":lang(en)").toString());
+        assertEquals(":lang(en-us)", QueryParser.parse(":lang( 'en-US' )").toString());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {
+        ":lang()",        // empty argument
+        ":lang( )",       // whitespace-only argument
+        ":lang('')",      // empty quoted range
+        ":lang(en us)",   // whitespace inside the range
+        ":lang(en,en-US)",// comma list
+        ":lang(en)x",     // extra characters after the range
+        ":lang(en-US",    // unclosed paren
+        ":lang(",         // missing close paren
+        ":lang('en)",     // unclosed quote
+        ":lang(en')",     // stray quote
+        "p:lang(en",      // unclosed in a compound selector
+    })
+    public void exceptOnBadLang(String query) {
+        assertThrows(SelectorParseException.class, () -> QueryParser.parse(query));
+    }
+
+    @Test
+    public void langFailureDoesNotMutateDom() {
+        Document doc = Jsoup.parse(
+            "<main lang='en'><p id=a></p><div id=b lang='en-US'><span id=c></span></div></main>");
+        String before = doc.toString();
+        assertThrows(SelectorParseException.class, () -> doc.select(":lang(en,"));
+        assertEquals(before, doc.toString());
+        // a legal query on the same document afterwards still returns the original results
+        assertEquals("main,p#a,div#b,span#c", doc.select(":lang(en)").stream()
+            .map(e -> e.tagName() + (e.id().isEmpty() ? "" : "#" + e.id()))
+            .collect(java.util.stream.Collectors.joining(",")));
     }
 
     @Test
