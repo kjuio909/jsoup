@@ -2,6 +2,7 @@ package org.jsoup.parser;
 
 
 import org.jsoup.Jsoup;
+import org.jsoup.internal.SharedConstants;
 import org.jsoup.nodes.Document;
 import org.jsoup.nodes.Element;
 import org.jspecify.annotations.NullMarked;
@@ -20,7 +21,11 @@ public class HtmlTreeBuilderTest {
     public void ensureSearchArraysAreSorted() {
         List<Object[]> treeBuilderArrays = HtmlTreeBuilderStateTest.findConstantArrays(HtmlTreeBuilder.class);
         HtmlTreeBuilderStateTest.ensureSorted(treeBuilderArrays);
-        assertEquals(3, treeBuilderArrays.size());
+        assertEquals(2, treeBuilderArrays.size());
+
+        List<Object[]> sharedArrays = HtmlTreeBuilderStateTest.findConstantArrays(SharedConstants.class);
+        HtmlTreeBuilderStateTest.ensureSorted(sharedArrays);
+        assertEquals(2, sharedArrays.size());
 
         List<Object[]> tagOptionArrays = HtmlTreeBuilderStateTest.findConstantArrays(HtmlTagOptions.class);
         HtmlTreeBuilderStateTest.ensureSorted(tagOptionArrays);

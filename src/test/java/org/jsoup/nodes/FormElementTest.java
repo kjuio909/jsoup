@@ -48,16 +48,111 @@ public class FormElementTest {
         FormElement form = (FormElement) doc.select("form").first();
         List<Connection.KeyVal> data = form.formData();
 
-        assertEquals(6, data.size());
+        assertEquals(5, data.size());
         assertEquals("one=two", data.get(0).toString());
-        assertEquals("three=four", data.get(1).toString());
-        assertEquals("three=five", data.get(2).toString());
-        assertEquals("six=seven", data.get(3).toString());
-        assertEquals("seven=on", data.get(4).toString()); // set
-        assertEquals("eight=on", data.get(5).toString()); // default
+        assertEquals("three=four", data.get(1).toString()); // single-value select submits only the first selected option
+        assertEquals("six=seven", data.get(2).toString());
+        assertEquals("seven=on", data.get(3).toString()); // set
+        assertEquals("eight=on", data.get(4).toString()); // default
         // nine should not appear, not checked checkbox
         // ten should not appear, disabled
         // eleven should not appear, button
+    }
+
+    @Test public void multiSelectSubmitsAllSelectedEnabledOptions() {
+        String html = "<form><select name='three' multiple><option value='not'>" +
+                "<option value='four' selected><option value='five' selected>" +
+                "<option value='six' selected disabled></select></form>";
+        Document doc = Jsoup.parse(html);
+        FormElement form = (FormElement) doc.selectFirst("form");
+        List<Connection.KeyVal> data = form.formData();
+
+        assertEquals(2, data.size());
+        assertEquals("three=four", data.get(0).toString());
+        assertEquals("three=five", data.get(1).toString());
+    }
+
+    @Test public void multiSelectWithNoSelectedOptionsSubmitsNothing() {
+        String html = "<form><select name='three' multiple><option value='not'><option value='four'></select></form>";
+        Document doc = Jsoup.parse(html);
+        FormElement form = (FormElement) doc.selectFirst("form");
+        assertTrue(form.formData().isEmpty());
+    }
+
+    @Test public void selectFallsBackToFirstEnabledOption() {
+        String html = "<form><select name='one'><option value='no' disabled><option value='two'></select>" +
+                "<select name='three'><option value='four' selected disabled><option value='five' selected></select></form>";
+        Document doc = Jsoup.parse(html);
+        FormElement form = (FormElement) doc.selectFirst("form");
+        List<Connection.KeyVal> data = form.formData();
+
+        assertEquals(2, data.size());
+        assertEquals("one=two", data.get(0).toString()); // no selection; first option is disabled, so falls to next
+        assertEquals("three=five", data.get(1).toString()); // selected but disabled option is skipped
+    }
+
+    @Test public void excludesControlsInDisabledFieldsetExceptFirstLegend() {
+        String html = "<form>" +
+                "<fieldset disabled>" +
+                "  <legend><input name='one' value='in-legend'></legend>" +
+                "  <input name='two' value='in-fieldset'>" +
+                "  <legend><input name='three' value='second-legend'></legend>" +
+                "</fieldset>" +
+                "<input name='four' value='after'>" +
+                "</form>";
+        Document doc = Jsoup.parse(html);
+        FormElement form = (FormElement) doc.selectFirst("form");
+        List<Connection.KeyVal> data = form.formData();
+
+        assertEquals(2, data.size());
+        assertEquals("one=in-legend", data.get(0).toString());
+        assertEquals("four=after", data.get(1).toString());
+    }
+
+    @Test public void includesControlsLinkedByFormAttributeInDocumentOrder() {
+        String html = "<input name='one' value='outer-first' form='f'>" +
+                "<form id='f'><input name='two' value='inner'></form>" +
+                "<input name='three' value='outer-last' form='f'>" +
+                "<input name='four' value='other' form='other'>" +
+                "<input name='five' value='invalid' form='no-such-form'>";
+        Document doc = Jsoup.parse(html);
+        FormElement form = (FormElement) doc.selectFirst("form");
+        List<Connection.KeyVal> data = form.formData();
+
+        assertEquals(3, data.size());
+        assertEquals("one=outer-first", data.get(0).toString());
+        assertEquals("two=inner", data.get(1).toString());
+        assertEquals("three=outer-last", data.get(2).toString());
+    }
+
+    @Test public void formAttributeOverridesAncestorForm() {
+        String html = "<form id='a'><input name='one' value='a'><input name='two' value='b' form='b'></form>" +
+                "<form id='b'></form>";
+        Document doc = Jsoup.parse(html);
+        FormElement formA = (FormElement) doc.selectFirst("form#a");
+        FormElement formB = (FormElement) doc.selectFirst("form#b");
+
+        List<Connection.KeyVal> dataA = formA.formData();
+        assertEquals(1, dataA.size());
+        assertEquals("one=a", dataA.get(0).toString());
+
+        List<Connection.KeyVal> dataB = formB.formData();
+        assertEquals(1, dataB.size());
+        assertEquals("two=b", dataB.get(0).toString());
+    }
+
+    @Test public void formDataIsRepeatableAndIndependent() {
+        String html = "<form><input name='one' value='two'></form>";
+        Document doc = Jsoup.parse(html);
+        FormElement form = (FormElement) doc.selectFirst("form");
+
+        List<Connection.KeyVal> first = form.formData();
+        assertEquals(1, first.size());
+        first.clear();
+
+        List<Connection.KeyVal> second = form.formData();
+        assertEquals(1, second.size());
+        assertEquals("one=two", second.get(0).toString());
     }
 
     @Test public void formDataUsesFirstAttribute() {
