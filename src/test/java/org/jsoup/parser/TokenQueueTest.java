@@ -212,6 +212,28 @@ public class TokenQueueTest {
         assertEquals("Foo", s); // no escape, no eof. Just straight up Foo.
     }
 
+    @Test void consumeBareValueEscape() {
+        // a hexadecimal escape's own trailing whitespace is consumed as part of the escape
+        TokenQueue hex = new TokenQueue("\\3d b");
+        StringBuilder sb = new StringBuilder();
+        hex.consumeBareValueEscape(sb);
+        assertEquals("=", sb.toString());
+        assertEquals("b", hex.remainder());
+
+        // a simple escape decodes the escaped character
+        TokenQueue simple = new TokenQueue("\\=x");
+        sb.setLength(0);
+        simple.consumeBareValueEscape(sb);
+        assertEquals("=", sb.toString());
+        assertEquals("x", simple.remainder());
+
+        // an escape of whitespace, or a dangling escape, is an error in a bare value
+        assertThrows(IllegalArgumentException.class,
+            () -> new TokenQueue("\\ ").consumeBareValueEscape(new StringBuilder()));
+        assertThrows(IllegalArgumentException.class,
+            () -> new TokenQueue("\\").consumeBareValueEscape(new StringBuilder()));
+    }
+
     @ParameterizedTest
     @MethodSource("cssIdentifiers")
     @MethodSource("cssAdditionalIdentifiers")

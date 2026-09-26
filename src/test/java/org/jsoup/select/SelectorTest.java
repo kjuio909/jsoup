@@ -1991,6 +1991,11 @@ public class SelectorTest {
         assertSelectedIds(doc.select("body [data-v=\\41lpha]"), "f");
         assertSelectedIds(doc.select("body [data-v=Al\\70ha]"), "f");
         assertSelectedIds(doc.select("body [data-v=\\41]")); // "A" != "Alpha"
+
+        // a hexadecimal escape's own trailing whitespace is part of the escape, not the value boundary
+        assertSelectedIds(doc.select("body [data-v=a\\20 b]"), "a", "b"); // \20<space> -> " "
+        assertSelectedIds(doc.select("body [data-v=\\41\\20\\42]"), "a", "b"); // "A B"
+        assertSelectedIds(doc.select("body [data-v='A\\20 B']"), "a"); // quoted: case-sensitive "A B"
     }
 
     @Test void documentUnchangedAfterAttributeParseException() {

@@ -235,6 +235,22 @@ public class TokenQueue implements AutoCloseable {
     }
 
     /**
+     Consumes a CSS escape sequence found inside an unquoted attribute value; the escape character ({@code \}) must be
+     at the head of the queue. Behaves as {@link #consumeCssEscapeSequence(StringBuilder)}, except that an escape
+     immediately followed by whitespace or by the end of the input is an error: in a bare value such whitespace must
+     remain the end of the value, rather than being swallowed by the escape (a hexadecimal escape's own single
+     trailing whitespace is still consumed as part of that escape).
+     @param out the builder to append the decoded escape to
+     @throws IllegalArgumentException if the escape is dangling ({@code \} at end of input) or escapes whitespace
+     */
+    public void consumeBareValueEscape(StringBuilder out) {
+        advance(); // drop the escape character
+        if (isEmpty() || StringUtil.isWhitespace(current()))
+            throw new IllegalArgumentException("Incomplete escape sequence in unquoted attribute value");
+        consumeCssEscapeSequenceInto(out);
+    }
+
+    /**
      Decodes CSS escape sequences in the input string: a backslash followed by a character yields that character, and a
      backslash followed by up to 6 hexadecimal digits (and one optional trailing whitespace) yields that code point.
      @param in the string to decode

@@ -377,11 +377,10 @@ public class QueryParser implements AutoCloseable {
                 "Could not parse attribute query '%s': unexpected token at '%s'", query, cq.remainder());
 
             cq.consumeWhitespace();
-            final String rawValue = consumeAttributeValue(cq);
-            final boolean quoted = !rawValue.isEmpty() && (rawValue.charAt(0) == '"' || rawValue.charAt(0) == '\'');
+            final String value = consumeAttributeValue(cq);
             // Quoted (CSS string) values keep their quotes and are decoded in the evaluator; bare values have their
-            // CSS escapes decoded here, so escaped and unescaped forms of the same value match equally.
-            final String value = quoted ? rawValue : TokenQueue.unescapeCss(rawValue);
+            // CSS escapes decoded while consumed, so escaped and unescaped forms of the same value match equally.
+            final boolean quoted = !value.isEmpty() && (value.charAt(0) == '"' || value.charAt(0) == '\'');
             cq.consumeWhitespace();
 
             // Quoted (CSS string) values compare case-sensitively by default; bare values keep jsoup's historical
@@ -469,9 +468,14 @@ public class QueryParser implements AutoCloseable {
             return StringUtil.releaseBuilder(sb);
         }
 
-        // bare value, up to the next whitespace or the end of the queue
+        // bare value, up to the next whitespace or the end of the queue. CSS escapes are decoded while scanning, so
+        // that a hexadecimal escape's own trailing whitespace (e.g. a\3d b -> a=b) is consumed as part of the escape
+        // rather than ending the value; a backslash escaping whitespace or dangling at the end is a parse error.
         StringBuilder sb = StringUtil.borrowBuilder();
-        while (!cq.isEmpty() && !cq.matchesWhitespace()) sb.append(cq.consume());
+        while (!cq.isEmpty() && !cq.matchesWhitespace()) {
+            if (cq.matches('\\')) cq.consumeBareValueEscape(sb);
+            else sb.append(cq.consume());
+        }
         return StringUtil.releaseBuilder(sb);
     }
 
