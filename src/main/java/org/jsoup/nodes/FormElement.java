@@ -22,7 +22,7 @@ import java.util.List;
 public class FormElement extends Element {
     private final Elements linkedEls = new Elements();
     // contains form submittable elements that were linked during the parse (and due to parse rules, may no longer be a child of this form)
-    private static final Evaluator submittable = Selector.evaluatorOf(StringUtil.join(SharedConstants.FormSubmitTags, ", "));
+    private static final Evaluator formListed = Selector.evaluatorOf(StringUtil.join(SharedConstants.FormListedTags, ", "));
 
     /**
      * Create a new, standalone form element.
@@ -36,19 +36,54 @@ public class FormElement extends Element {
     }
 
     /**
-     * Get the list of form control elements associated with this form.
+     * Get the list of form control elements associated with this form. Controls are returned in document order, and
+     * may be descendants of this form, linked to it during parse error recovery, or associated via their
+     * {@code form} attribute.
      * @return form controls associated with this element.
      */
     public Elements elements() {
         // As elements may have been added or removed from the DOM after parse, prepare a new list that unions them:
-        Elements els = select(submittable); // current form children
-        for (Element linkedEl : linkedEls) {
-            if (linkedEl.ownerDocument() != null && !els.contains(linkedEl)) {
-                els.add(linkedEl); // adds previously linked elements, that weren't previously removed from the DOM
+        Document doc = ownerDocument();
+        Elements candidates;
+        if (doc != null) {
+            // scan the document so that controls moved by parse error recovery, and controls associated via their form
+            // attribute, are all found in document order
+            candidates = doc.select(formListed);
+        } else {
+            candidates = select(formListed); // current form children
+            for (Element linkedEl : linkedEls) {
+                if (linkedEl.ownerDocument() != null && !candidates.contains(linkedEl)) {
+                    candidates.add(linkedEl); // adds previously linked elements, that weren't previously removed from the DOM
+                }
             }
         }
 
+        Elements els = new Elements();
+        for (Element el : candidates) {
+            if (isAssociatedControl(el)) els.add(el);
+        }
         return els;
+    }
+
+    /**
+     Tests if the element is a form control currently associated with this form: it is a descendant of the form; it was
+     linked to the form during the parse, is still in the document, and has not been re-parented into another form; or
+     its {@code form} attribute points to this form's ID. An explicit {@code form} attribute takes precedence over
+     ancestor and parse-time association.
+     */
+    private boolean isAssociatedControl(Element el) {
+        String formId = el.attr("form");
+        if (!formId.isEmpty())
+            return formId.equals(attr("id"));
+
+        boolean linked = linkedEls.contains(el);
+        Element parent = el.parent();
+        while (parent != null) {
+            if (parent == this) return true; // simple child of this form
+            if (parent.nameIs("form")) return false; // re-parented into a different form
+            parent = parent.parent();
+        }
+        return linked && el.ownerDocument() != null;
     }
 
     /**
@@ -99,10 +134,9 @@ public class FormElement extends Element {
         ArrayList<Connection.KeyVal> data = new ArrayList<>();
 
         // iterate the form control elements and accumulate their values
-        Elements formEls = elements();
-        for (Element el: formEls) {
+        for (Element el : elements()) {
             if (!el.tag().isFormSubmittable()) continue; // contents are form listable, superset of submitable
-            if (el.hasAttr("disabled")) continue; // skip disabled form inputs
+            if (isDisabled(el)) continue; // skip disabled form inputs
             String name = el.attr("name");
             if (name.length() == 0) continue;
             String type = el.attr("type");
@@ -110,16 +144,24 @@ public class FormElement extends Element {
             if (type.equalsIgnoreCase("button") || type.equalsIgnoreCase("image")) continue; // browsers don't submit these
 
             if (el.nameIs("select")) {
-                Elements options = el.select("option[selected]");
+                Elements options = el.select("option");
+                boolean multiple = el.hasAttr("multiple");
                 boolean set = false;
-                for (Element option: options) {
-                    data.add(HttpConnection.KeyVal.create(name, option.val()));
-                    set = true;
-                }
-                if (!set) {
-                    Element option = el.selectFirst("option");
-                    if (option != null)
+                for (Element option : options) {
+                    if (!isEnabledOption(option)) continue; // skip disabled options and optgroups
+                    if (option.hasAttr("selected")) {
                         data.add(HttpConnection.KeyVal.create(name, option.val()));
+                        set = true;
+                        if (!multiple) break; // a single select submits only its first selected option
+                    }
+                }
+                if (!set && !multiple) {
+                    // with nothing selected, a single select submits its first enabled option
+                    for (Element option : options) {
+                        if (!isEnabledOption(option)) continue;
+                        data.add(HttpConnection.KeyVal.create(name, option.val()));
+                        break;
+                    }
                 }
             } else if ("checkbox".equalsIgnoreCase(type) || "radio".equalsIgnoreCase(type)) {
                 // only add checkbox or radio if they have the checked attribute
@@ -132,6 +174,47 @@ public class FormElement extends Element {
             }
         }
         return data;
+    }
+
+    /**
+     A control is disabled if it has the {@code disabled} attribute, or is a descendant of a disabled {@code fieldset}
+     (unless it is within that fieldset's first {@code legend} element).
+     */
+    private static boolean isDisabled(Element el) {
+        if (el.hasAttr("disabled")) return true;
+        Element parent = el.parent();
+        while (parent != null) {
+            if (parent.nameIs("fieldset") && parent.hasAttr("disabled") && !inFirstLegend(parent, el))
+                return true;
+            parent = parent.parent();
+        }
+        return false;
+    }
+
+    /** Tests if the element is a descendant of the first {@code legend} child of the {@code fieldset}. */
+    private static boolean inFirstLegend(Element fieldset, Element el) {
+        for (Element child : fieldset.children()) {
+            if (child.nameIs("legend")) {
+                Element parent = el.parent();
+                while (parent != null) {
+                    if (parent == child) return true;
+                    parent = parent.parent();
+                }
+                return false; // only the first legend provides an exception
+            }
+        }
+        return false;
+    }
+
+    /** An option is enabled if it does not have the {@code disabled} attribute and is not in a disabled {@code optgroup}. */
+    private static boolean isEnabledOption(Element option) {
+        if (option.hasAttr("disabled")) return false;
+        Element parent = option.parent();
+        while (parent != null && !parent.nameIs("select")) {
+            if (parent.nameIs("optgroup") && parent.hasAttr("disabled")) return false;
+            parent = parent.parent();
+        }
+        return true;
     }
 
     @Override
