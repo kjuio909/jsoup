@@ -4,8 +4,6 @@ import org.jsoup.Connection;
 import org.jsoup.Jsoup;
 import org.jsoup.helper.HttpConnection;
 import org.jsoup.helper.Validate;
-import org.jsoup.internal.SharedConstants;
-import org.jsoup.internal.StringUtil;
 import org.jsoup.parser.Tag;
 import org.jsoup.select.Elements;
 import org.jsoup.select.Evaluator;
@@ -20,9 +18,11 @@ import java.util.List;
  * form to easily be submitted.
  */
 public class FormElement extends Element {
-    private final Elements linkedEls = new Elements();
+    private Elements linkedEls = new Elements();
     // contains form submittable elements that were linked during the parse (and due to parse rules, may no longer be a child of this form)
-    private static final Evaluator submittable = Selector.evaluatorOf(StringUtil.join(SharedConstants.FormSubmitTags, ", "));
+    // all form-listed elements, per the HTML spec: button, fieldset, input, keygen, object, output, select, textarea
+    private static final Evaluator formListed = Selector.evaluatorOf(
+        "button, fieldset, input, keygen, object, output, select, textarea");
 
     /**
      * Create a new, standalone form element.
@@ -36,19 +36,58 @@ public class FormElement extends Element {
     }
 
     /**
-     * Get the list of form control elements associated with this form.
+     * Get the list of form control elements associated with this form. A control is associated either through a
+     * matching {@code form="<id>"} attribute (resolved to the first form in the document with that id), or, when no
+     * such attribute is present, through its nearest ancestor {@code <form>}; controls linked to this form by the
+     * parser but relocated by parse rules (such as those fostered out of a form inside a table) are included too.
+     * The list is freshly computed in document order and reflects the current state of the DOM.
      * @return form controls associated with this element.
      */
     public Elements elements() {
-        // As elements may have been added or removed from the DOM after parse, prepare a new list that unions them:
-        Elements els = select(submittable); // current form children
-        for (Element linkedEl : linkedEls) {
-            if (linkedEl.ownerDocument() != null && !els.contains(linkedEl)) {
-                els.add(linkedEl); // adds previously linked elements, that weren't previously removed from the DOM
+        Elements els = new Elements();
+        Document owner = ownerDocument();
+        if (owner == null) {
+            // an orphaned, stand-alone form: fall back to its current descendants and parser-linked controls
+            els.addAll(select(formListed));
+            for (Element linkedEl : linkedEls) {
+                if (!els.contains(linkedEl)) els.add(linkedEl);
             }
+            return els;
         }
 
-        return els;
+        // a form="<id>" reference resolves, in tree order, to the first <form> with that id
+        String formId = id();
+        boolean referencedFormsResolveHere = formId.length() == 0 || firstFormWithId(owner, formId) == this;
+
+        for (Element el : owner.select(formListed)) {
+            if (isFormOwner(el, formId, referencedFormsResolveHere))
+                els.add(el);
+        }
+        return els; // owner.select yields elements in document order, and each is visited at most once
+    }
+
+    private static @Nullable Element firstFormWithId(Document owner, String formId) {
+        for (Element form : owner.select("form")) {
+            if (formId.equals(form.id())) return form;
+        }
+        return null;
+    }
+
+    /**
+     * Determine whether this form is the form owner of the given control, following the HTML association rules:
+     * an explicit {@code form} attribute wins and resolves to the first form with that id; otherwise the nearest
+     * form ancestor owns it, falling back to the parser-established link for controls displaced by parse rules.
+     */
+    private boolean isFormOwner(Element el, String formId, boolean referencedFormsResolveHere) {
+        String referenced = el.attr("form");
+        if (referenced.length() > 0)
+            return referencedFormsResolveHere && referenced.equals(formId);
+
+        for (Element ancestor = el.parentElement(); ancestor != null; ancestor = ancestor.parentElement()) {
+            if (ancestor.nameIs("form")) return ancestor == this;
+        }
+        // no form ancestor: retain the association established while parsing (e.g. fostered out of a table form)
+        return linkedEls.contains(el);
     }
 
     /**
@@ -68,9 +107,9 @@ public class FormElement extends Element {
     }
 
     /**
-     Prepare to submit this form. A Connection object is created with the request set up from the form values. This
-     Connection will inherit the settings and the cookies (etc) of the connection/session used to request this Document
-     (if any), as available in {@link Document#connection()}
+     * Prepare to submit this form. A Connection object is created with the request set up from the form values. This
+     * Connection will inherit the settings and the cookies (etc) of the connection/session used to request this Document
+     * (if any), as available in {@link Document#connection()}
      <p>You can then set up other options (like user-agent, timeout, cookies), then execute it.</p>
 
      @return a connection prepared from the values of this form, in the same session as the one used to request it
@@ -99,8 +138,7 @@ public class FormElement extends Element {
         ArrayList<Connection.KeyVal> data = new ArrayList<>();
 
         // iterate the form control elements and accumulate their values
-        Elements formEls = elements();
-        for (Element el: formEls) {
+        for (Element el: elements()) {
             if (!el.tag().isFormSubmittable()) continue; // contents are form listable, superset of submitable
             if (el.hasAttr("disabled")) continue; // skip disabled form inputs
             String name = el.attr("name");
@@ -110,32 +148,105 @@ public class FormElement extends Element {
             if (type.equalsIgnoreCase("button") || type.equalsIgnoreCase("image")) continue; // browsers don't submit these
 
             if (el.nameIs("select")) {
-                Elements options = el.select("option[selected]");
-                boolean set = false;
-                for (Element option: options) {
-                    data.add(HttpConnection.KeyVal.create(name, option.val()));
-                    set = true;
-                }
-                if (!set) {
-                    Element option = el.selectFirst("option");
-                    if (option != null)
-                        data.add(HttpConnection.KeyVal.create(name, option.val()));
-                }
+                addSelectData(name, el, data);
             } else if ("checkbox".equalsIgnoreCase(type) || "radio".equalsIgnoreCase(type)) {
                 // only add checkbox or radio if they have the checked attribute
-                if (el.hasAttr("checked")) {
+                if (el.hasAttr("checked") && !isDisabledByFieldset(el, type)) {
                     final String val = el.val().length() >  0 ? el.val() : "on";
                     data.add(HttpConnection.KeyVal.create(name, val));
                 }
             } else {
+                if (isDisabledByFieldset(el, type)) continue;
                 data.add(HttpConnection.KeyVal.create(name, el.val()));
             }
         }
         return data;
     }
 
+    private void addSelectData(String name, Element select, ArrayList<Connection.KeyVal> data) {
+        if (isDisabledByFieldset(select, "")) return;
+
+        boolean multiple = select.hasAttr("multiple");
+        Elements options = select.select("option");
+        Element firstEnabled = null;
+        boolean submitted = false;
+
+        for (Element option : options) {
+            if (!optionEnabled(option)) continue;
+            if (firstEnabled == null) firstEnabled = option;
+            if (option.hasAttr("selected")) {
+                data.add(HttpConnection.KeyVal.create(name, option.val()));
+                submitted = true;
+                if (!multiple) return; // single-select submits the first selected enabled option, in final order
+            }
+        }
+
+        if (!submitted && !multiple && firstEnabled != null) {
+            // single-select with no enabled selected option falls back to the first enabled option
+            data.add(HttpConnection.KeyVal.create(name, firstEnabled.val()));
+        }
+        // multi-select with no enabled selections, or a single-select with no enabled options, submits nothing
+    }
+
+    private boolean optionEnabled(Element option) {
+        if (option.hasAttr("disabled")) return false;
+        // an option is also unavailable when its nearest enclosing <optgroup> is disabled
+        for (Element ancestor = option.parentElement();
+             ancestor != null && ancestor.nameIs("optgroup");
+             ancestor = ancestor.parentElement()) {
+            if (ancestor.hasAttr("disabled")) return false;
+        }
+        return true;
+    }
+
+    /**
+     * Per the HTML spec, a disabled fieldset excludes all of its descendant controls except those within the subtree
+     * of its first direct {@code <legend>} child. The exception does not extend to siblings or nested fieldsets outside
+     * that legend. An {@code <input type="hidden">} is not disabled by a fieldset.
+     */
+    private boolean isDisabledByFieldset(Element control, String type) {
+        if ("hidden".equalsIgnoreCase(type)) return false;
+        Element ancestor = control.parent();
+        while (ancestor != null) {
+            if (ancestor.nameIs("fieldset") && ancestor.hasAttr("disabled")) {
+                Element legend = firstLegendChild(ancestor);
+                if (legend == null || !isDescendant(control, legend)) return true;
+                // control is inside the exempt first legend; continue checking ancestors outside of this fieldset
+                ancestor = ancestor.parent();
+            } else {
+                ancestor = ancestor.parent();
+            }
+        }
+        return false;
+    }
+
+    private @Nullable Element firstLegendChild(Element fieldset) {
+        for (Element child : fieldset.children()) {
+            if (child.nameIs("legend")) return child;
+        }
+        return null;
+    }
+
+    private boolean isDescendant(Element node, Element ancestor) {
+        Node parent = node.parentNode();
+        while (parent != null) {
+            if (parent == ancestor) return true;
+            parent = parent.parentNode();
+        }
+        return false;
+    }
+
     @Override
     public FormElement clone() {
         return (FormElement) super.clone();
+    }
+
+    @Override
+    protected FormElement doClone(@Nullable Node parent) {
+        FormElement clone = (FormElement) super.doClone(parent);
+        // don't share the parser-linked list; its members belong to the source tree, and the clone's descendants stay
+        // associated through their form ancestry
+        clone.linkedEls = new Elements();
+        return clone;
     }
 }
