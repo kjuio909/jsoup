@@ -1669,6 +1669,87 @@ public class SelectorTest {
         }
     }
 
+    @Test void nthChildOfSelectorExample() {
+        // the spec's example: numbering is over the siblings satisfying the of S filter list, not all siblings
+        String html = "<ul>" +
+            "<li id=a class=ready data-kind=card></li>" +
+            "<li id=b data-kind=ad></li>" +           // hidden ad: not in S, neither numbered nor matched
+            "<li id=c data-kind=card></li>" +
+            "<li id=d disabled data-kind=card></li>" + // disabled: still in S unless excluded
+            "<li id=e class=ready></li>" +
+            "</ul>";
+        Document doc = Jsoup.parse(html);
+
+        // filtered set (union of the list) is a, c, d, e; odd positions are a and d
+        assertSelectedIds(doc.select("li:nth-child(2n+1 of .ready, [data-kind=card])"), "a", "d");
+        // excluding disabled items keeps the numbering stable over the surviving set: a, c, e -> a, e
+        assertSelectedIds(doc.select("li:nth-child(2n+1 of .ready, [data-kind=card]:not([disabled]))"), "a", "e");
+        // the candidate type is still enforced: only li elements can match
+        Element ad = doc.expectFirst("#b").appendElement("span");
+        ad.attr("data-kind", "card").attr("id", "s");
+        assertSelectedIds(doc.select("li:nth-child(2n+1 of .ready, [data-kind=card])"), "a", "d");
+    }
+
+    @Test void nthChildOfSelectorRenumberedAfterMutation() {
+        // a compiled Evaluator must renumber against the live tree on every call; nothing is cached
+        Document doc = Jsoup.parse("<ul>" +
+            "<li id=a class=k></li><li id=b class=k></li><li id=c class=k></li><li id=d class=k></li></ul>");
+        Evaluator evaluator = Selector.evaluatorOf("li:nth-child(odd of .k)");
+
+        assertSelectedIds(doc.select(evaluator), "a", "c");
+
+        doc.expectFirst("#a").remove();                 // delete a sibling: b, d are now the odd positions
+        assertSelectedIds(doc.select(evaluator), "b", "d");
+
+        Element b = doc.expectFirst("#b");
+        doc.expectFirst("ul").appendChild(b);           // move b to the end: c, b at odd positions
+        assertSelectedIds(doc.select(evaluator), "c", "b");
+
+        doc.expectFirst("#c").removeClass("k");         // filter input changes: set is d, b -> d odd
+        assertSelectedIds(doc.select(evaluator), "d");
+
+        doc.expectFirst("#c").attr("data-k", "1");      // a filter depending on an attribute
+        Evaluator attrEval = Selector.evaluatorOf("li:nth-child(1 of [data-k])");
+        assertSelectedIds(doc.select(attrEval), "c");
+        doc.expectFirst("#c").removeAttr("data-k");
+        assertSelectedIds(doc.select(attrEval));
+
+        // same tree, same selector: stable across repeated calls
+        Evaluator stable = Selector.evaluatorOf("li:nth-child(2n of .k)");
+        assertEquals(doc.select(stable), doc.select(stable));
+    }
+
+    @Test void nthChildOfSelectorScopeAndCombinators() {
+        // :scope in S binds to the element select was invoked on
+        Document doc = Jsoup.parse(
+            "<section id=s><div id=d>" +
+            "<p id=a class=z></p><p id=b></p><p id=c class=z></p>" +
+            "</div></section>");
+        Element div = doc.expectFirst("#d");
+        assertSelectedIds(div.select("p:nth-child(odd of :scope > .z)"), "a");
+        assertSelectedIds(div.select("p:nth-child(even of :scope > .z)"), "c");
+
+        // structural combinators in S are anchored at each numbered sibling
+        Document sibs = Jsoup.parse("<ul>" +
+            "<li id=a class=p></li><li id=b class=q></li><li id=c class=q></li><li id=d></li></ul>");
+        assertSelectedIds(sibs.select("li:nth-child(1 of .p + .q)"), "b");      // only b follows .p directly
+        assertSelectedIds(sibs.select("li:nth-child(2 of .p ~ .q)"), "c");      // b, c are the eligible set
+    }
+
+    @Test void nthChildOfSelectorMixedTypesAndNodes() {
+        // mixed element types: only elements matching S count, text and comment nodes never do
+        Document doc = Jsoup.parse("<div>" +
+            "<!-- lead -->" +
+            "<span id=s class=c>x</span> text " +
+            "<div id=d1 class=c></div>" +
+            "<div id=d2 class=c></div>" +
+            "</div>");
+        // eligible .c elements in document order: s, d1, d2; the div candidates at positions 2 and 3
+        assertSelectedIds(doc.select("div:nth-child(odd of .c)"), "d2");
+        assertSelectedIds(doc.select("div:nth-child(2 of .c)"), "d1");
+        assertSelectedIds(doc.select("div:nth-last-child(1 of .c)"), "d2");
+    }
+
     @Test void nthChildOfSelectorToString() {
         assertEquals("li:nth-child(2n+1 of .p)", Selector.evaluatorOf("li:nth-child(odd of .p)").toString());
         assertEquals("li:nth-last-child(1 of .p)", Selector.evaluatorOf("li:nth-last-child(1 of .p)").toString());
