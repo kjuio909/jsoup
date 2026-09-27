@@ -444,4 +444,55 @@ public class FormElementTest {
         assertEquals("a=A&b=B", dataString(form));
         assertEquals(2, form.elements().size());
     }
+
+    @Test void nestedDescendantMovedOutOfFormLosesAssociation() {
+        // a parser-linked control is not a direct child of the form; reparenting it through its wrapper must clear
+        // the parser association rather than leave a ghost
+        Document doc = Jsoup.parse("<form id=f><div><input name=a value=A></div><input name=b value=B></form>");
+        FormElement form = doc.expectForm("#f");
+        assertEquals("a=A&b=B", dataString(form));
+
+        doc.body().appendChild(doc.selectFirst("[name=a]")); // moved outside the form, no form= attribute
+        assertEquals("b=B", dataString(form));
+        assertEquals(1, form.elements().size());
+    }
+
+    @Test void fosteredControlMovedElsewhereLosesAssociation() {
+        // the classic fostered form is associated via the parser link; once the control is adopted into a spot with
+        // no form ancestor, that link is spent
+        String html = "<table><form id=f><tr><td><input name=user value=u></td>" +
+            "<td><input name=pass value=p></td></tr></form></table>";
+        Document doc = Jsoup.parse(html);
+        FormElement form = doc.expectForm("#f");
+        assertEquals("user=u&pass=p", dataString(form));
+
+        doc.body().appendChild(doc.selectFirst("[name=user]")); // adopted by body, no form ancestor
+        assertEquals("pass=p", dataString(form));
+
+        doc.body().appendChild(doc.selectFirst("[name=pass]"));
+        assertEquals("", dataString(form));
+        assertEquals(0, form.elements().size());
+    }
+
+    @Test void detachedFormDoesNotKeepGhostsAfterSubtreeRemoval() {
+        Document doc = Jsoup.parse("<form id=f><div id=wrap><input name=a value=A></div><input name=b value=B></form>");
+        FormElement form = doc.expectForm("#f");
+        form.remove(); // the form is now an orphaned fragment
+        assertNull(form.ownerDocument());
+        assertEquals("a=A&b=B", dataString(form));
+
+        form.selectFirst("#wrap").remove(); // removes the linked control via a non-form parent
+        assertEquals("b=B", dataString(form)); // no ghost, no reordering
+
+        form.selectFirst("[name=b]").attr("disabled", "");
+        assertEquals("", dataString(form));
+    }
+
+    @Test void movingControlWithinFormKeepsItInFinalOrder() {
+        // reordering direct children still lists both via their form ancestry, in the new document order
+        Document doc = Jsoup.parse("<form id=f><input name=a value=A><input name=b value=B></form>");
+        FormElement form = doc.expectForm("#f");
+        doc.selectFirst("[name=a]").before(doc.selectFirst("[name=b]")); // b now precedes a
+        assertEquals("b=B&a=A", dataString(form));
+    }
 }

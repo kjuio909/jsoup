@@ -459,9 +459,6 @@ public class HtmlTreeBuilder extends TreeBuilder {
     private void doInsertElement(Element el) {
         enforceStackDepthLimit();
 
-        if (formElement != null && el.tag().namespace.equals(NamespaceHtml) && StringUtil.inSorted(el.normalName(), TagFormListed))
-            formElement.addElement(el); // connect form controls to their form element
-
         // in HTML, the xmlns attribute if set must match what the parser set the tag's namespace to
         if (parser.getErrors().canAddError() && el.hasAttr("xmlns") && !el.attr("xmlns").equals(el.tag().namespace()))
             error("Invalid xmlns attribute [%s] on tag [%s]", el.attr("xmlns"), el.tagName());
@@ -471,6 +468,11 @@ public class HtmlTreeBuilder extends TreeBuilder {
             insertInFosterParent(el);
         else
             target.appendChild(el);
+
+        // connect form controls to their form element only after insertion, so the link captures the parent the
+        // parser finally placed the control at (a fostered control lands outside the form)
+        if (formElement != null && el.tag().namespace.equals(NamespaceHtml) && StringUtil.inSorted(el.normalName(), TagFormListed))
+            formElement.addElement(el);
 
         push(el);
     }

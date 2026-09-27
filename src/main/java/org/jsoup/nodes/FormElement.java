@@ -18,11 +18,30 @@ import java.util.List;
  * form to easily be submitted.
  */
 public class FormElement extends Element {
-    private Elements linkedEls = new Elements();
-    // contains form submittable elements that were linked during the parse (and due to parse rules, may no longer be a child of this form)
+    // form controls linked while parsing, in parse (document) order. A link remembers the parent the parser finally
+    // placed the control at, and stays valid only while the control keeps that exact parent and remains in the same
+    // tree as this form. This drops the parser association automatically for controls that are later removed or
+    // adopted elsewhere through some non-form parent (a nested descendant, or a fostered control moved out).
+    private ArrayList<LinkedControl> linkedEls = new ArrayList<>();
     // all form-listed elements, per the HTML spec: button, fieldset, input, keygen, object, output, select, textarea
     private static final Evaluator formListed = Selector.evaluatorOf(
         "button, fieldset, input, keygen, object, output, select, textarea");
+
+    private static final class LinkedControl {
+        final Element control;
+        final Node anchorParent; // immediate parent the control had when the parser placed it
+
+        LinkedControl(Element control) {
+            this.control = control;
+            // constructed after the control has been inserted, so this is its final parse-time parent
+            this.anchorParent = control.parentNode();
+        }
+
+        boolean isValid(Node formRoot) {
+            // a move or a detach changes the parent or the root; an untouched control still matches both
+            return control.parentNode() == anchorParent && control.root() == formRoot;
+        }
+    }
 
     /**
      * Create a new, standalone form element.
@@ -47,10 +66,11 @@ public class FormElement extends Element {
         Elements els = new Elements();
         Document owner = ownerDocument();
         if (owner == null) {
-            // an orphaned, stand-alone form: fall back to its current descendants and parser-linked controls
+            // an orphaned, stand-alone form: fall back to its current descendants and still-valid linked controls
+            final Node formRoot = root();
             els.addAll(select(formListed));
-            for (Element linkedEl : linkedEls) {
-                if (!els.contains(linkedEl)) els.add(linkedEl);
+            for (LinkedControl linked : linkedEls) {
+                if (linked.isValid(formRoot) && !els.contains(linked.control)) els.add(linked.control);
             }
             return els;
         }
@@ -60,7 +80,7 @@ public class FormElement extends Element {
         boolean referencedFormsResolveHere = formId.length() == 0 || firstFormWithId(owner, formId) == this;
 
         for (Element el : owner.select(formListed)) {
-            if (isFormOwner(el, formId, referencedFormsResolveHere))
+            if (isFormOwner(el, formId, referencedFormsResolveHere, owner))
                 els.add(el);
         }
         return els; // owner.select yields elements in document order, and each is visited at most once
@@ -76,9 +96,11 @@ public class FormElement extends Element {
     /**
      * Determine whether this form is the form owner of the given control, following the HTML association rules:
      * an explicit {@code form} attribute wins and resolves to the first form with that id; otherwise the nearest
-     * form ancestor owns it, falling back to the parser-established link for controls displaced by parse rules.
+     * form ancestor owns it, falling back to the parser-established link for controls displaced by parse rules
+     * (such as a control fostered out of a form inside a table). A parser link is only honoured while the control
+     * keeps the parent and tree the parser left it in, so later removals or reparenting clear the association.
      */
-    private boolean isFormOwner(Element el, String formId, boolean referencedFormsResolveHere) {
+    private boolean isFormOwner(Element el, String formId, boolean referencedFormsResolveHere, Node formRoot) {
         String referenced = el.attr("form");
         if (referenced.length() > 0)
             return referencedFormsResolveHere && referenced.equals(formId);
@@ -86,8 +108,11 @@ public class FormElement extends Element {
         for (Element ancestor = el.parentElement(); ancestor != null; ancestor = ancestor.parentElement()) {
             if (ancestor.nameIs("form")) return ancestor == this;
         }
-        // no form ancestor: retain the association established while parsing (e.g. fostered out of a table form)
-        return linkedEls.contains(el);
+        // no form ancestor: retain the association established while parsing, unless the control has since moved
+        for (LinkedControl linked : linkedEls) {
+            if (linked.control == el) return linked.isValid(formRoot);
+        }
+        return false;
     }
 
     /**
@@ -96,14 +121,15 @@ public class FormElement extends Element {
      * @return this form element, for chaining
      */
     public FormElement addElement(Element element) {
-        linkedEls.add(element);
+        linkedEls.add(new LinkedControl(element));
         return this;
     }
 
     @Override
     protected void removeChild(Node out) {
         super.removeChild(out);
-        linkedEls.remove(out);
+        // a direct child being removed can no longer be a parser-linked control of this form
+        linkedEls.removeIf(linked -> linked.control == out);
     }
 
     /**
@@ -244,9 +270,9 @@ public class FormElement extends Element {
     @Override
     protected FormElement doClone(@Nullable Node parent) {
         FormElement clone = (FormElement) super.doClone(parent);
-        // don't share the parser-linked list; its members belong to the source tree, and the clone's descendants stay
-        // associated through their form ancestry
-        clone.linkedEls = new Elements();
+        // don't share the parser-linked list; its anchors reference the source tree's nodes, and the clone's
+        // descendants stay associated through their form ancestry
+        clone.linkedEls = new ArrayList<>();
         return clone;
     }
 }
