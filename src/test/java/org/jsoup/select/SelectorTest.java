@@ -1680,6 +1680,60 @@ public class SelectorTest {
         assertEquals(":nth-child(2n+1 of .p)", new Evaluator.IsNthChild(2, 1, new Evaluator.Class("p")).toString());
     }
 
+    @Test void nthChildOfSelectorRecomputesAfterMutation() {
+        // a compiled Evaluator holds no positional state, so sibling add/remove/move and class/attribute changes
+        // renumber immediately; repeating against the unchanged tree is stable
+        Document doc = Jsoup.parse(
+            "<ul><li id=a class=p>1</li><li id=b>2</li><li id=c class=p>3</li></ul>");
+        Evaluator secondP = Selector.evaluatorOf("li:nth-child(2 of .p)");
+
+        assertSelectedIds(doc.select(secondP), "c");
+        assertSelectedIds(doc.select(secondP), "c"); // unchanged tree: stable
+
+        doc.expectFirst("#a").remove(); // only c remains among .p: position 2 is empty
+        assertTrue(doc.select(secondP).isEmpty());
+
+        Element ul = doc.expectFirst("ul");
+        ul.appendElement("li").attr("id", "d").attr("class", "p"); // b, c.p, d.p -> d is position 2
+        assertSelectedIds(doc.select(secondP), "d");
+
+        doc.expectFirst("#c").removeClass("p"); // filter changes: only d still matches .p
+        assertTrue(doc.select(secondP).isEmpty());
+        doc.expectFirst("#c").addClass("p");
+        assertSelectedIds(doc.select(secondP), "d");
+
+        // moving a sibling re-enumerates in document order: c, d, b -> c is now position 1, d position 2 still
+        ul.appendChild(doc.expectFirst("#b")); // b moves to the end, after the .p siblings
+        assertSelectedIds(secondP, ul, "d"); // d stays the 2nd .p; verify via a context root too
+    }
+
+    private static void assertSelectedIds(Evaluator eval, Element root, String... ids) {
+        assertSelectedIds(root.select(eval), ids);
+    }
+
+    @Test void nthChildOfSelectorMixedSiblingsExample() {
+        // hidden ads, disabled items and differing card types share the list; only siblings matching S are
+        // numbered, an item matching both S branches counts once, and non-matching siblings are skipped
+        Document doc = Jsoup.parse(
+            "<ul>" +
+            "<li class=ad data-kind=ad>ad</li>" +
+            "<li class=ready id=a>A</li>" +
+            "<li data-kind=card id=b>B</li>" +
+            "<li disabled id=skip>S</li>" +
+            "<li class=ready data-kind=card id=c>C</li>" +
+            "<li class=ready id=d>D</li>" +
+            "</ul>");
+
+        // qualifying order is a(1), b(2), c(3), d(4); 2n+1 selects a and c only
+        assertSelectedIds(doc.select("li:nth-child(2n+1 of .ready, [data-kind=card])"), "a", "c");
+        // reverse numbering: c is 2nd from the end among qualifying siblings, a 4th
+        assertSelectedIds(doc.select("li:nth-last-child(2 of .ready, [data-kind=card])"), "c");
+        assertSelectedIds(doc.select("li:nth-last-child(4 of .ready, [data-kind=card])"), "a");
+        // the skipped/ad siblings never occupy a numbered slot nor match themselves
+        assertFalse(doc.expectFirst("#skip").is("li:nth-child(3 of .ready, [data-kind=card])"));
+        assertFalse(doc.expectFirst(".ad").is(":nth-child(1 of .ready, [data-kind=card])"));
+    }
+
     // Tests that nested structural and combining evaluators get reset
     private static class ResetTracker extends Evaluator {
         boolean resetCalled = false;
