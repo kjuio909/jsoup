@@ -716,10 +716,110 @@ public class Safelist {
     }
 
     private boolean isSafeSrcsetUrl(Element el, String url, Set<Protocol> protocols) {
+        // apply the same structural rules as for a single-value URL attribute: no control characters or inner
+        // whitespace, and no bare scheme (e.g. "javascript:") with nothing after the colon
+        if (!isSoundUrlValue(url)) return false;
+        // the scheme must still be allowed after percent-decoding and stripping control characters, so that a
+        // dangerous scheme cannot hide behind e.g. "java%73cript:", "%6Aavascript:", "%00javascript:", or leading
+        // whitespace and control bytes
+        if (!isSafeDecodedScheme(url, protocols)) return false;
+
         String value = StringUtil.resolve(el.baseUri(), url);
         if (value.isEmpty() && !StringUtil.hasHttpScheme(url))
             value = url; // if it could not be made absolute, run as-is to allow custom unknown protocols
         return isSafeProtocol(value, protocols);
+    }
+
+    /**
+     Checks the scheme of a candidate URL against the configured protocols, after undoing obfuscations that could hide
+     a dangerous scheme from a naive prefix check. A real URL scheme is terminated by a <b>literal</b> colon, so the
+     raw value is scanned for its first colon; percent-encoded bytes and ASCII control characters in the scheme run
+     before that colon are normalized (e.g. {@code java%73cript:}, {@code %6Aavascript:}, and {@code java%00script:}
+     all reveal {@code javascript:}). A value with no literal-colon scheme (a relative reference such as
+     {@code x%3Ay.jpg} or an already-encoded {@code http%3a//host}) is left to the standard base-URI resolution
+     rules, exactly like a single-value URL attribute. Never throws.
+     */
+    private static boolean isSafeDecodedScheme(String url, Set<Protocol> protocols) {
+        int colon = url.indexOf(':');
+        if (colon <= 0) return true; // no literal scheme separator: a relative / protocol-relative reference
+
+        String head = url.substring(0, colon);
+        // the scheme run may only contain scheme characters or percent-escapes; anything else (e.g. a leading "//")
+        // means this colon is not a scheme separator
+        int length = head.length();
+        boolean sawEscape = false;
+        for (int i = 0; i < length; i++) {
+            char c = head.charAt(i);
+            if (c == '%') { sawEscape = true; continue; }
+            boolean schemeChar = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+                || (c >= '0' && c <= '9') || c == '+' || c == '-' || c == '.';
+            if (!schemeChar) return true; // not a scheme; defer to base-URI resolution
+        }
+        if (!sawEscape) return true; // an unescaped scheme is checked by the normal resolved-URL protocol test
+
+        // decode the escaped bytes and drop any revealed control characters, then confirm a well-formed scheme
+        String decoded = stripControlChars(percentDecode(head));
+        if (decoded.isEmpty() || !isSchemeAlpha(decoded.charAt(0))) return true;
+        for (int i = 0; i < decoded.length(); i++) {
+            char c = decoded.charAt(i);
+            boolean schemeChar = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+                || (c >= '0' && c <= '9') || c == '+' || c == '-' || c == '.';
+            if (!schemeChar) return true; // decoding revealed a non-scheme byte, so it is a relative reference
+        }
+
+        String scheme = lowerCase(decoded);
+        for (Protocol protocol : protocols) {
+            String prot = protocol.toString();
+            if (!prot.equals("#") && scheme.equals(prot)) return true; // the "#" pseudo-protocol never matches a scheme
+        }
+        return false;
+    }
+
+    /** Removes ASCII control characters (0x00-0x1F and DEL), which browsers ignore when reading a URL scheme. */
+    private static String stripControlChars(String value) {
+        int length = value.length();
+        StringBuilder stripped = null;
+        for (int i = 0; i < length; i++) {
+            char c = value.charAt(i);
+            if (c <= 0x1f || c == 0x7f) {
+                if (stripped == null) {
+                    stripped = new StringBuilder(length);
+                    stripped.append(value, 0, i);
+                }
+            } else if (stripped != null) {
+                stripped.append(c);
+            }
+        }
+        return stripped != null ? stripped.toString() : value;
+    }
+
+    /**
+     Leniently decodes {@code %XX} percent-escapes to their (ISO-8859-1 mapped) character. Malformed or incomplete
+     escapes are left as-is. Used only to reveal an obfuscated URL scheme, so decoding never throws and charset
+     subtleties outside the ASCII scheme are irrelevant.
+     */
+    private static String percentDecode(String url) {
+        int length = url.length();
+        if (length < 3 || url.indexOf('%') == -1) return url;
+        StringBuilder decoded = null;
+        for (int i = 0; i < length; i++) {
+            char c = url.charAt(i);
+            if (c == '%' && i + 2 < length) {
+                int hi = Character.digit(url.charAt(i + 1), 16);
+                int lo = Character.digit(url.charAt(i + 2), 16);
+                if (hi >= 0 && lo >= 0) {
+                    if (decoded == null) {
+                        decoded = new StringBuilder(length);
+                        decoded.append(url, 0, i);
+                    }
+                    decoded.append((char) ((hi << 4) | lo));
+                    i += 2;
+                    continue;
+                }
+            }
+            if (decoded != null) decoded.append(c);
+        }
+        return decoded != null ? decoded.toString() : url;
     }
 
     /**
@@ -771,6 +871,11 @@ public class Safelist {
     /** The ASCII whitespace characters: space, tab, newline, carriage return, and form feed. */
     private static boolean isSrcsetSpace(char c) {
         return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f';
+    }
+
+    /** Tests if the character is an ASCII letter, the required first character of a URL scheme. */
+    private static boolean isSchemeAlpha(char c) {
+        return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z');
     }
 
     /**

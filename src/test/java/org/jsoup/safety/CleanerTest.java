@@ -932,4 +932,123 @@ public class CleanerTest {
         assertEquals("<img srcset=\"a.jpg?x=1&amp;y=2 1x\">", clean);
         assertEquals(clean, Jsoup.clean(clean, safelist)); // stable when re-cleaned
     }
+
+    private static Safelist srcsetSafelist() {
+        return Safelist.basicWithImages()
+            .addAttributes("img", "srcset")
+            .addProtocols("img", "srcset", "http", "https");
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {
+        "java%73cript:alert(1) 1x",       // percent-encoded scheme letter
+        "%6Aavascript:alert(1) 1x",        // percent-encoded first letter
+        "java%7fscript:alert(1) 1x",       // percent-encoded DEL inside scheme
+        "java%01script:alert(1) 1x",       // percent-encoded SOH inside scheme
+        "java%00script:alert(1) 1x",       // percent-encoded NUL inside scheme
+        "vb%73cript:msgbox(1) 1x",         // another scheme, encoded letter
+        "java%53cript:alert(1) 1x",        // uppercase hex variant
+        "javascript: 1x",                  // bare scheme, nothing after colon
+        "java\u007fscript:alert(1) 1x",    // literal DEL inside scheme
+        "java script:alert(1) 1x"          // whitespace inside the URL
+    })
+    void srcsetObfuscatedDangerousSchemeDropped(String badCandidate) {
+        Safelist safelist = srcsetSafelist();
+        String html = "<img srcset='" + badCandidate + ", https://example.com/safe.jpg 2x'>";
+        String clean = Jsoup.clean(html, "https://example.com/page/", safelist);
+        assertEquals("<img srcset=\"https://example.com/safe.jpg 2x\">", clean);
+        assertEquals(clean, Jsoup.clean(clean, "https://example.com/page/", safelist)); // stable, bad never returns
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {
+        "java%73cript:alert(1) 1x",
+        "%6Aavascript:alert(1) 1x",
+        "   ",
+        "",
+        "a.jpg 0w",
+        "javascript:only(1)"
+    })
+    void srcsetAttributeRemovedWhenAllCandidatesRejected(String value) {
+        Safelist safelist = srcsetSafelist();
+        String clean = Jsoup.clean("<img alt='x' srcset='" + value + "'>", "https://example.com/page/", safelist);
+        assertEquals("<img alt=\"x\">", clean);
+        assertFalse(clean.contains("srcset"));
+    }
+
+    @Test void srcsetPercentEncodedRelativeReferencesSurvive() {
+        // no literal colon means these are relative references, exactly as for single URL attributes
+        Safelist safelist = srcsetSafelist().preserveRelativeLinks(true);
+        String clean = Jsoup.clean(
+            "<img srcset='x%3Ay.jpg 1x, images/a%20b.jpg 2x, http%3a//evil.com/x 3x, https://ok.com/z.jpg 4x'>",
+            "https://example.com/page/", safelist);
+        assertEquals("<img srcset=\"x%3Ay.jpg 1x, images/a%20b.jpg 2x, http%3a//evil.com/x 3x, https://ok.com/z.jpg 4x\">", clean);
+    }
+
+    @Test void srcsetEntityDecodedSchemeDropped() {
+        Safelist safelist = srcsetSafelist();
+        // the parser decodes &#x73; to 's', revealing javascript:
+        String clean = Jsoup.clean(
+            "<img srcset='java&#x73;cript:alert(1) 1x, https://example.com/safe.jpg 2x'>",
+            "https://example.com/page/", safelist);
+        assertEquals("<img srcset=\"https://example.com/safe.jpg 2x\">", clean);
+    }
+
+    @Test void srcsetProtocolRelativeUsesBaseScheme() {
+        Safelist safelist = srcsetSafelist();
+        // an https base makes protocol-relative and root-relative candidates resolve to https during the safety
+        // check; the surviving original candidate text is emitted unchanged
+        String clean = Jsoup.clean("<img srcset='//cdn.example.com/a.jpg 1x, /b.jpg 2x'>",
+            "https://example.com/page/", safelist);
+        assertEquals("<img srcset=\"//cdn.example.com/a.jpg 1x, /b.jpg 2x\">", clean);
+
+        // against a non-http(s) base these cannot be resolved to an allowed scheme, so they are dropped
+        String ftpClean = Jsoup.clean("<img srcset='//cdn.example.com/a.jpg 1x, https://ok.com/x 2x'>",
+            "ftp://example.com/page/", safelist);
+        assertEquals("<img srcset=\"https://ok.com/x 2x\">", ftpClean);
+    }
+
+    @Test void srcsetElementsCleanedIndependently() {
+        Safelist safelist = srcsetSafelist();
+        String html = "<img srcset='javascript:bad(1) 1x'>"
+            + "<img srcset='https://example.com/ok.jpg 2x'>"
+            + "<img srcset='java%73cript:x, https://example.com/two.jpg'>";
+        String clean = Jsoup.clean(html, "https://example.com/page/", safelist);
+        assertEquals("<img><img srcset=\"https://example.com/ok.jpg 2x\">"
+            + "<img srcset=\"https://example.com/two.jpg\">", clean);
+    }
+
+    @Test void srcsetCleaningDoesNotMutateInputAndIsIsolated() {
+        Safelist safelist = srcsetSafelist();
+        String srcset = "java%73cript:bad(1) 1x, https://example.com/ok.jpg 2x, javascript:also(2) 3x";
+        Document dirty = Jsoup.parse("<img srcset='" + srcset + "'>", "https://example.com/page/");
+        String originalValue = dirty.select("img").attr("srcset");
+
+        Cleaner cleaner = new Cleaner(safelist);
+        Document clean = cleaner.clean(dirty);
+
+        // the source document is untouched
+        assertEquals(originalValue, dirty.select("img").attr("srcset"));
+        assertEquals(srcset, dirty.select("img").attr("srcset"));
+
+        // the cleaned document carries only the safe candidate
+        assertEquals("<img srcset=\"https://example.com/ok.jpg 2x\">", clean.body().html());
+
+        // mutating the result cannot leak back into the source
+        clean.select("img").attr("srcset", "mutated");
+        assertEquals(srcset, dirty.select("img").attr("srcset"));
+
+        // repeated cleaning is stable
+        Document again = cleaner.clean(clean);
+        assertEquals("<img srcset=\"mutated\">", again.body().html());
+    }
+
+    @Test void srcsetKeepsOriginalOrderAndDescriptors() {
+        Safelist safelist = srcsetSafelist().preserveRelativeLinks(true);
+        String html = "<img srcset='https://a.example/1 1x, javascript:drop 2x, https://b.example/2 300w, "
+            + "java%73cript:x, https://c.example/3, rel.jpg 2.5x'>";
+        String clean = Jsoup.clean(html, "https://example.com/page/", safelist);
+        assertEquals("<img srcset=\"https://a.example/1 1x, https://b.example/2 300w, https://c.example/3, rel.jpg 2.5x\">",
+            clean);
+    }
 }
