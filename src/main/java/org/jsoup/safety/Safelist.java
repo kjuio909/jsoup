@@ -72,6 +72,7 @@ import static org.jsoup.internal.Normalizer.lowerCase;
  */
 public class Safelist {
     private static final String All = ":all";
+    private static final String AnchorProtocol = "#";
     private static final TagName AllTag = TagName.valueOf(All);
     private final Set<TagName> tagNames; // tags allowed, lower case. e.g. [p, br, span]
     private final Map<TagName, Set<AttributeKey>> attributes; // tag -> attribute[]. allowed attributes [href] for a tag.
@@ -536,7 +537,7 @@ public class Safelist {
             if (protocols.containsKey(tag)) {
                 Map<AttributeKey, Set<Protocol>> attrProts = protocols.get(tag);
                 // ok if not defined protocol; otherwise test
-                return !attrProts.containsKey(key) || isSafeProtocol(getProtocolValue(el, attr), attrProts.get(key));
+                return !attrProts.containsKey(key) || isSafeProtocol(el, attr, attrProts.get(key));
             } else { // attribute found, no protocols defined, so OK
                 return true;
             }
@@ -551,18 +552,38 @@ public class Safelist {
         return !tagName.equals(All) && isSafeAttribute(All, el, attr);
     }
 
-    private String getProtocolValue(Element el, Attribute attr) {
-        String value = el.absUrl(attr.getKey());
-        if (value.isEmpty() && !StringUtil.hasHttpScheme(attr.getValue()))
-            value = attr.getValue(); // if it could not be made abs, run as-is to allow custom unknown protocols
-        return value;
-    }
+    /**
+     Validate a URL-valued attribute against the protocols configured for this exact tag + attribute pair. Each
+     attribute's protocol set is tested independently and never leaks to another attribute.
+     <p>
+     Two checks must both pass:
+     </p>
+     <ol>
+     <li>The scheme declared by the raw, parsed attribute value (HTML entities are already decoded by the parser) must
+     itself be allowed. A value such as {@code javascript\:alert(1)} is a relative reference to
+     {@link java.net.URL}; against a real base URI -- or against the placeholder base used to preserve relative links --
+     it resolves to an {@code http(s)} URL and would smuggle a dangerous scheme past a check that only inspects the
+     resolved URL. The declared scheme is read straight from the raw value while skipping characters that browsers
+     disregard and that historically disguise schemes: ASCII controls and whitespace (leading, trailing, or embedded),
+     backslashes, other Unicode whitespace, and Unicode format characters such as zero-width space. A value that
+     declares no scheme (a relative, root-relative, or protocol-relative reference, or a bare fragment) declares
+     nothing and is left to the second check.</li>
+     <li>The existing resolution-based check still applies, so relative links, anchors, and custom (non-HTTP) protocols
+     retain their previous semantics, and hostless {@code http(s)} URLs remain invalid.</li>
+     </ol>
+     */
+    private boolean isSafeProtocol(Element el, Attribute attr, Set<Protocol> protocols) {
+        // gate 1: the scheme the raw value declares must itself be allowed for this attribute
+        String declaredScheme = schemeOf(attr.getValue());
+        if (declaredScheme != null && !protocolsContain(protocols, declaredScheme))
+            return false;
 
-    private boolean isSafeProtocol(String value, Set<Protocol> protocols) {
+        // gate 2: the pre-existing resolution-based validation (relative links, anchors, custom schemes, http hosts)
+        String value = getProtocolValue(el, attr);
         for (Protocol protocol : protocols) {
             String prot = protocol.toString();
 
-            if (prot.equals("#")) { // allows anchor links
+            if (prot.equals(AnchorProtocol)) { // allows anchor links
                 if (isValidAnchor(value)) {
                     return true;
                 } else {
@@ -578,6 +599,82 @@ public class Safelist {
             }
         }
         return false;
+    }
+
+    private static boolean protocolsContain(Set<Protocol> protocols, String scheme) {
+        String lcScheme = lowerCase(scheme); // ASCII case-insensitive comparison
+        for (Protocol protocol : protocols) {
+            if (lcScheme.equals(lowerCase(protocol.toString())))
+                return true;
+        }
+        return false;
+    }
+
+    private String getProtocolValue(Element el, Attribute attr) {
+        String value = el.absUrl(attr.getKey());
+        if (value.isEmpty() && !StringUtil.hasHttpScheme(attr.getValue()))
+            value = attr.getValue(); // if it could not be made abs, run as-is to allow custom unknown protocols
+        return value;
+    }
+
+    /**
+     Read the URL scheme (RFC 3986: {@code ALPHA *( ALPHA / DIGIT / "+" / "-" / "." ) ":"}) declared by a raw URL
+     value, skipping characters that browsers disregard and that can disguise a scheme -- ASCII controls and
+     whitespace (including leading and trailing padding), backslashes, other Unicode whitespace, and Unicode format
+     characters such as zero-width space. Returns {@code null} when the value declares no scheme (a relative,
+     root-relative, or protocol-relative reference, a bare fragment, or bytes before the colon that are not a legal
+     scheme even after normalization); those values are left to the existing relative-link semantics.
+     */
+    static String schemeOf(String value) {
+        if (value == null)
+            return null;
+        int len = value.length();
+        int pos = 0;
+        while (pos < len && isIgnorableSchemeChar(value.charAt(pos))) // leading padding
+            pos++;
+        if (pos >= len || !isAsciiAlpha(value.charAt(pos)))
+            return null;
+
+        StringBuilder scheme = new StringBuilder();
+        while (pos < len) {
+            char c = value.charAt(pos);
+            if (c == ':')
+                return scheme.length() > 0 ? lowerCase(scheme.toString()) : null;
+            if (isIgnorableSchemeChar(c)) { // browsers skip controls/padding; backslashes masquerade as '/'
+                pos++;
+                continue;
+            }
+            if (!isSchemeChar(c))
+                return null; // non-scheme byte before the colon: not a declared scheme
+            scheme.append(c);
+            pos++;
+        }
+        return null; // no colon
+    }
+
+    private static boolean isSchemeChar(char c) {
+        return isAsciiAlpha(c) || (c >= '0' && c <= '9') || c == '+' || c == '-' || c == '.';
+    }
+
+    private static boolean isAsciiAlpha(char c) {
+        return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z');
+    }
+
+    /**
+     True for characters that must be skipped while reading a scheme: C0/C1 controls and DEL, ASCII and Unicode
+     whitespace (including non-breaking and narrow no-breaking spaces), Unicode format characters (such as
+     zero-width space and the right-to-left override), and backslashes, which browsers treat like {@code /} and
+     which otherwise move the value into relative-reference handling.
+     */
+    private static boolean isIgnorableSchemeChar(char c) {
+        if (c == '\\')
+            return true;
+        if (c <= ' ' || (c >= 0x7f && c <= 0x9f))
+            return true; // C0 controls (incl. HT/LF/CR/FF), DEL, and C1 controls
+        if (c == 0xa0 || Character.isWhitespace(c)) // non-breaking space and other Unicode line/space separators
+            return true;
+        int type = Character.getType(c);
+        return type == Character.FORMAT || type == Character.SPACE_SEPARATOR; // zero-width / bidi, narrow nbsp, etc.
     }
 
     /**

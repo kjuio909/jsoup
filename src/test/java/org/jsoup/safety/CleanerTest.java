@@ -406,6 +406,223 @@ public class CleanerTest {
         assertEquals("<img src=\"cid:12345\"> <img src=\"data:gzzt\">", preserved);
     }
 
+    // a value such as javascript\:x is a relative reference to java.net.URL, and so resolved (against a real base
+    // URI, or the internal placeholder base) to an http(s) URL; it must not smuggle the javascript scheme through.
+    @Test void dropsBackslashObfuscatedJavascriptWithBaseUri() {
+        String[] payloads = {
+            "javascript\\:alert(1)",
+            "JAVASCRIPT\\:alert(1)",
+            "javascript\\\\:alert(1)",
+            "java\\script:alert(1)",
+            "\\javascript:alert(1)",
+            "javascript&#92;:alert(1)",
+        };
+        for (String href : payloads) {
+            String html = "<a href=\"" + href + "\">x</a>";
+            for (Safelist safelist : new Safelist[]{Safelist.basic(), Safelist.basic().preserveRelativeLinks(true)}) {
+                String clean = Jsoup.clean(html, "https://example.com/", safelist);
+                assertFalse(Jsoup.parse(clean).expectFirst("a").hasAttr("href"), href + " -> " + clean);
+                assertFalse(clean.contains("javascript"), href);
+                assertFalse(Jsoup.isValid(html, safelist), href);
+            }
+        }
+    }
+
+    @Test void dropsBackslashObfuscatedJavascriptWhenPreservingRelativeLinks() {
+        String[] payloads = {
+            "javascript\\:alert(1)",
+            "JAVASCRIPT\\:alert(1)",
+            "javascript\\\\:alert(1)",
+            "java\\script:alert(1)",
+            "\\javascript:alert(1)",
+            "data\\:text/html,<script>alert(1)</script>",
+        };
+        Safelist safelist = Safelist.basicWithImages().preserveRelativeLinks(true);
+        for (String url : payloads) {
+            String html = "<a href=\"" + url + "\">a</a><img src=\"" + url + "\">";
+            String clean = Jsoup.clean(html, safelist);
+            assertTrue(clean.contains("<a>a</a>"), url + " -> " + clean);
+            assertTrue(clean.matches("(?s).*<img>.*"), url + " -> " + clean);
+            assertFalse(clean.contains("javascript"), url);
+            assertFalse(clean.contains("data:"), url);
+            assertFalse(Jsoup.isValid(html, safelist), url);
+        }
+    }
+
+    @ParameterizedTest @ValueSource(strings = {
+        "javascript:alert(1)",
+        "JAVASCRIPT:alert(1)",
+        "JaVaScRiPt:alert(1)",
+        " javascript:alert(1)",
+        "javascript:alert(1) ",
+        "&#9;javascript:alert(1)",
+        "&#10;javascript:alert(1)",
+        "&#13;javascript:alert(1)",
+        "&#12;javascript:alert(1)",
+        "&#0;javascript:alert(1)",
+        "ja&Tab;va&Tab;script:alert(1)",
+        "java&#1;script:alert(1)",
+        "javascript&colon;alert(1)",
+        "javascript&#58;alert(1)",
+        "javascript\\:alert(1)",
+        "\u00a0javascript:alert(1)",
+        "\u200bjavascript:alert(1)",
+        "\u3000javascript:alert(1)",
+        "\u202fjavascript:alert(1)",
+        "javascript\u00a0:alert(1)",
+        "javascript::alert(1)",
+        "java:script:alert(1)",
+        "vbscript:msgbox(1)",
+    })
+    void dropsObfuscatedDangerousProtocols(String href) {
+        String html = "<a href=\"" + href + "\">x</a>";
+        for (Safelist safelist : new Safelist[]{Safelist.basic(), Safelist.basic().preserveRelativeLinks(true)}) {
+            String clean = Jsoup.clean(html, "https://example.com/", safelist);
+            assertFalse(Jsoup.parse(clean).expectFirst("a").hasAttr("href"), href + " -> " + clean);
+            assertFalse(clean.contains("javascript"), href + " -> " + clean);
+            assertFalse(clean.contains("vbscript"), href + " -> " + clean);
+            assertFalse(Jsoup.isValid(html, safelist), href);
+        }
+    }
+
+    @Test void dropsObfuscatedDataProtocolFromImage() {
+        String[] srcs = {
+            "data:text/html,<script>alert(1)</script>",
+            "DATA:text/html,foo",
+            " data:text/html,foo",
+            "&#9;data:text/html,foo",
+            "da&#1;ta:text/html,foo",
+            "data\\:text/html,foo",
+            "\u00a0data:text/html,foo",
+        };
+        for (String src : srcs) {
+            String html = "<img src=\"" + src + "\" alt=\"x\">";
+            String clean = Jsoup.clean(html, "https://example.com/", Safelist.basicWithImages());
+            assertEquals("<img alt=\"x\">", clean, src);
+            assertFalse(Jsoup.isValid(html, Safelist.basicWithImages()), src);
+        }
+    }
+
+    @Test void protocolSetsArePerAttributeAndDoNotLeak() {
+        Safelist safelist = new Safelist()
+            .addTags("x")
+            .addAttributes("x", "href", "src", "action")
+            .addProtocols("x", "href", "https")
+            .addProtocols("x", "src", "data")
+            .addProtocols("x", "action", "http")
+            .preserveRelativeLinks(true);
+
+        // each value is accepted only by the one attribute that allows its scheme
+        String html = "<x href=\"https://h.example/\" src=\"data:text/plain,hi\" action=\"http://a.example/\"></x>";
+        assertEquals("<x href=\"https://h.example/\" src=\"data:text/plain,hi\" action=\"http://a.example/\"></x>",
+            Jsoup.clean(html, safelist));
+
+        // data: is allowed on src but not href/action; schemes never leak across attributes
+        assertEquals("<x src=\"data:text/plain,hi\"></x>",
+            Jsoup.clean("<x href=\"data:text/plain,hi\" src=\"data:text/plain,hi\" action=\"data:text/plain,hi\"></x>", safelist));
+        // http is allowed on action but not href/src; https on href but not src/action
+        assertEquals("<x href=\"https://h.example/\"></x>",
+            Jsoup.clean("<x href=\"https://h.example/\" src=\"https://h.example/\" action=\"https://h.example/\"></x>", safelist));
+    }
+
+    @Test void attributesOnOneElementAreDecidedIndependently() {
+        Safelist safelist = new Safelist()
+            .addTags("x")
+            .addAttributes("x", "href", "src", "action", "title")
+            .addProtocols("x", "href", "https")
+            .addProtocols("x", "src", "https")
+            .addProtocols("x", "action", "https")
+            .preserveRelativeLinks(true);
+
+        String html = "<x href=\"https://ok/\" src=\"javascript:bad(1)\" action=\"https://go/\" title=\"keep\">txt</x>";
+        String clean = Jsoup.clean(html, safelist);
+        // the dangerous src is dropped; element, other safe attributes, and text are all retained
+        assertEquals("<x href=\"https://ok/\" action=\"https://go/\" title=\"keep\">txt</x>", clean);
+
+        Document reparsed = Jsoup.parse(clean);
+        Element x = reparsed.expectFirst("x");
+        assertEquals("https://ok/", x.attr("href"));
+        assertFalse(x.hasAttr("src"));
+        assertEquals("https://go/", x.attr("action"));
+        assertEquals("txt", x.text());
+    }
+
+    @Test void retainsSafeUrlsWithPathQueryAndFragment() {
+        String html = "<a href=\"http://example.com/a/b?c=d&e=f#frag-1\">x</a>"
+            + "<a href=\"HTTPS://EXAMPLE.com/X:Y?Q=1#Z:2\">y</a>";
+        String clean = Jsoup.clean(html, Safelist.basic());
+        assertEquals("<a href=\"http://example.com/a/b?c=d&amp;e=f#frag-1\" rel=\"nofollow\">x</a>"
+            + "<a href=\"https://EXAMPLE.com/X:Y?Q=1#Z:2\" rel=\"nofollow\">y</a>", clean);
+    }
+
+    @Test void retainsRelativeReferencesWhenConfigured() {
+        Safelist safelist = Safelist.basicWithImages().preserveRelativeLinks(true);
+        String html = "<a href='path/page'>rel</a><a href='/root/path'>root</a><a href='?q=1'>query</a>"
+            + "<a href='#frag-1'>frag</a><a href='//cdn.example.com/x'>proto</a><img src='../img.png'>";
+        String clean = Jsoup.clean(html, safelist);
+        assertEquals("<a href=\"path/page\">rel</a><a href=\"/root/path\">root</a><a href=\"?q=1\">query</a>"
+            + "<a href=\"#frag-1\">frag</a><a href=\"//cdn.example.com/x\" rel=\"nofollow\">proto</a>"
+            + "<img src=\"../img.png\">", clean);
+
+        // fragments are allowed only when the safelist explicitly adds the "#" protocol
+        String withAnchor = Jsoup.clean("<a href=\"#frag-1\">f</a>", Safelist.relaxed().addProtocols("a", "href", "#"));
+        assertEquals("<a href=\"#frag-1\">f</a>", withAnchor);
+    }
+
+    @Test void cleaningIsIdempotentAndReparseable() {
+        Safelist safelist = new Safelist()
+            .addTags("a", "b", "img")
+            .addAttributes("a", "href", "title")
+            .addAttributes("img", "src", "alt")
+            .addProtocols("a", "href", "https", "http")
+            .addProtocols("img", "src", "https", "http", "data")
+            .preserveRelativeLinks(true);
+        String html = "<a href=\"https://example.com/p?x=1#f\" title=\"t\">keep <b>text</b></a>"
+            + "<img src=\"data:text/plain,hi\" alt=\"a\"><a href=\"javascript:evil()\">drop</a>";
+
+        String once = Jsoup.clean(html, safelist);
+        String twice = Jsoup.clean(once, safelist);
+        assertEquals(once, twice);
+        assertTrue(once.contains("<a href=\"https://example.com/p?x=1#f\" title=\"t\">keep <b>text</b></a>"));
+        assertTrue(once.contains("<img src=\"data:text/plain,hi\" alt=\"a\">"));
+        assertEquals("<a>drop</a>", once.substring(once.lastIndexOf("<a")));
+
+        Document doc = Jsoup.parse(twice);
+        assertEquals(2, doc.select("a").size());
+        assertEquals(1, doc.select("img").size());
+        assertEquals("https://example.com/p?x=1#f", doc.expectFirst("a").attr("href"));
+    }
+
+    @Test void malformedValuesRejectSafelyWithoutThrowing() {
+        String[] values = {"javascript::x", "java:script:x", ":", "", "foo", "a:b:c:d",
+            "&#0;:x", "&#1;&#2;&#3;javascript:x", "javascript\u00a0:x", "\u200b:x", "\u3000:x"};
+        for (boolean preserveRelative : new boolean[]{true, false}) {
+            Safelist safelist = Safelist.basic().preserveRelativeLinks(preserveRelative);
+            for (String href : values) {
+                String html = "<a href=\"" + href + "\">x</a>";
+                String clean = assertDoesNotThrow(() -> Jsoup.clean(html, "https://example.com/", safelist), href);
+                assertFalse(clean.contains("javascript"), href + " -> " + clean);
+                assertDoesNotThrow(() -> Jsoup.parse(clean)); // output stays a usable document
+                assertDoesNotThrow(() -> Jsoup.isValid(html, safelist));
+            }
+        }
+    }
+
+    @Test void removingDangerousAttributeKeepsElementAndOtherContent() {
+        Safelist safelist = Safelist.relaxed().addAttributes("a", "class");
+
+        String html = "<a href=\"javascript:alert(1)\" title=\"t\" class=\"c\">txt <b>B</b></a>";
+        String clean = Jsoup.clean(html, safelist);
+        assertEquals("<a title=\"t\" class=\"c\">txt <b>B</b></a>", clean);
+
+        Document doc = Jsoup.parse(clean); // output is a normal, selectable document
+        Element a = doc.expectFirst("a");
+        assertFalse(a.hasAttr("href"));
+        assertEquals("t", a.attr("title"));
+        assertEquals("c", a.attr("class"));
+        assertEquals("B", a.expectFirst("b").text());
+    }
+
     @Test public void handlesAllPseudoTag() {
         String html = "<p class='foo' src='bar'><a class='qux'>link</a></p>";
         Safelist safelist = new Safelist()
@@ -440,7 +657,7 @@ public class CleanerTest {
 
         assertEquals("<div><p>&Bscr;</p></div>", customOut); // entities now prefers shorted names if aliased
         assertEquals("<div>\n" +
-            " <p>ℬ</p>\n" +
+            " <p>\u212c</p>\n" +
             "</div>", defaultOut);
 
         os.charset("ASCII");
@@ -475,7 +692,7 @@ public class CleanerTest {
     }
 
     @Test public void cleansInternationalText() {
-        assertEquals("привет", Jsoup.clean("привет", Safelist.none()));
+        assertEquals("\u043f\u0440\u0438\u0432\u0435\u0442", Jsoup.clean("\u043f\u0440\u0438\u0432\u0435\u0442", Safelist.none()));
     }
 
     @Test

@@ -96,5 +96,38 @@ public class SafelistTest {
         assertNull(safelist);
     }
 
+    @Test
+    void schemeOfDetectsObfuscatedSchemes() {
+        // declared schemes are read case-insensitively, skipping controls, whitespace, backslashes, and Unicode padding
+        assertEquals("javascript", Safelist.schemeOf("javascript:alert(1)"));
+        assertEquals("javascript", Safelist.schemeOf("JAVASCRIPT:alert(1)"));
+        assertEquals("javascript", Safelist.schemeOf(" JaVa\tScript\n\r\f:alert(1)"));
+        assertEquals("javascript", Safelist.schemeOf("\u0000javascript:alert(1)"));
+        assertEquals("javascript", Safelist.schemeOf("\u200bjavascript:alert(1)"));
+        assertEquals("javascript", Safelist.schemeOf("\u3000javascript:alert(1)"));
+        assertEquals("javascript", Safelist.schemeOf("\u202fjavascript:alert(1)"));
+        assertEquals("javascript", Safelist.schemeOf("javascript :alert(1)"));
+        assertEquals("javascript", Safelist.schemeOf("javascript\u0000:alert(1)"));
+        assertEquals("javascript", Safelist.schemeOf("javascript\\:alert(1)"));
+        assertEquals("javascript", Safelist.schemeOf("java\\script:alert(1)"));
+        assertEquals("javascript", Safelist.schemeOf("\\javascript:alert(1)"));
+        assertEquals("http", Safelist.schemeOf("http://example.com/a:b?c=1#d:e"));
+        assertEquals("data", Safelist.schemeOf("data:text/plain,hi"));
+        assertEquals("custom-scheme+1.x", Safelist.schemeOf("Custom-Scheme+1.x:v"));
+    }
+
+    @Test
+    void schemeOfReturnsNullForRelativeAndMalformedValues() {
+        String[] relativeOrMalformed = {
+            null, "", ":", "/root/rel", "path/rel", "?q=1", "#frag-1", "//cdn.example.com/x",
+            "javascript/:not-a-scheme",   // a slash before the colon makes it a relative reference
+            "1http:x", "+http:x", "-http:x",
+        };
+        for (String value : relativeOrMalformed) {
+            assertNull(Safelist.schemeOf(value), String.valueOf(value));
+        }
+        // syntactically a scheme (dots are legal), so declared and therefore checked against the allowed set
+        assertEquals("example.com", Safelist.schemeOf("example.com:8080"));
+    }
 
 }
