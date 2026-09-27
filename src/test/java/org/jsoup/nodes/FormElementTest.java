@@ -10,6 +10,9 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -48,13 +51,13 @@ public class FormElementTest {
         FormElement form = (FormElement) doc.select("form").first();
         List<Connection.KeyVal> data = form.formData();
 
-        assertEquals(6, data.size());
+        assertEquals(5, data.size());
         assertEquals("one=two", data.get(0).toString());
-        assertEquals("three=four", data.get(1).toString());
-        assertEquals("three=five", data.get(2).toString());
-        assertEquals("six=seven", data.get(3).toString());
-        assertEquals("seven=on", data.get(4).toString()); // set
-        assertEquals("eight=on", data.get(5).toString()); // default
+        assertEquals("three=four", data.get(1).toString()); // single select: only first selected option
+        assertEquals("six=seven", data.get(2).toString());
+        assertEquals("seven=on", data.get(3).toString()); // set
+        assertEquals("eight=on", data.get(4).toString()); // default
+        // five should not appear, single select only submits one
         // nine should not appear, not checked checkbox
         // ten should not appear, disabled
         // eleven should not appear, button
@@ -222,5 +225,233 @@ public class FormElementTest {
         List<Connection.KeyVal> keyVals = form.formData();
         assertEquals("one", keyVals.get(0).value());
         assertEquals("two", keyVals.get(1).value());
+    }
+
+    private static List<String> dataStrings(List<Connection.KeyVal> data) {
+        List<String> strings = new ArrayList<>();
+        for (Connection.KeyVal kv : data) strings.add(kv.toString());
+        return strings;
+    }
+
+    @Test void formDataIncludesExternalFormAttributeControlsInDocumentOrder() {
+        String html =
+            "<form id=fA><input name=a value=1></form>" +
+            "<form id=fB><input name=b value=2></form>" +
+            "<input name=c value=3 form=fA>" +
+            "<input name=other value=x form=nope>" +   // invalid form id, ignored
+            "<input value=noname form=fA>" +           // no name, ignored
+            "<select name=s form=fA><option selected>A1<option>A2</select>";
+        Document doc = Jsoup.parse(html);
+
+        FormElement fA = (FormElement) doc.getElementById("fA");
+        assertEquals(Arrays.asList("a=1", "c=3", "s=A1"), dataStrings(fA.formData()));
+
+        // an external control after the form is included by that form
+        Document doc2 = Jsoup.parse("<body>" +
+            "<form id=fB><input name=b value=2></form>" +
+            "<input name=ext value=9 form=fB></body>");
+        assertEquals(Arrays.asList("b=2", "ext=9"),
+            dataStrings(((FormElement) doc2.getElementById("fB")).formData()));
+    }
+
+    @Test void externalControlPointingAtOtherFormIsIgnored() {
+        Document doc = Jsoup.parse("<form id=a><input name=inside value=1></form>" +
+            "<form id=b></form><input name=x value=2 form=b>");
+        FormElement a = (FormElement) doc.getElementById("a");
+        FormElement b = (FormElement) doc.getElementById("b");
+        assertEquals(Collections.singletonList("inside=1"), dataStrings(a.formData()));
+        assertEquals(Collections.singletonList("x=2"), dataStrings(b.formData()));
+    }
+
+    @Test void formAttributeControlInsideAnotherFormIsOwnedByAttribute() {
+        // a control nested in form B but with form="a" belongs to form a
+        Document doc = Jsoup.parse("<form id=a></form>" +
+            "<form id=b><input name=x value=2 form=a><input name=y value=3></form>");
+        FormElement a = (FormElement) doc.getElementById("a");
+        FormElement b = (FormElement) doc.getElementById("b");
+        assertEquals(Collections.singletonList("x=2"), dataStrings(a.formData()));
+        assertEquals(Collections.singletonList("y=3"), dataStrings(b.formData()));
+    }
+
+    @Test void sameControlReachedByTwoPathsIsIncludedOnce() {
+        // fostered control is parser-linked and also carries a matching form attribute
+        Document doc = Jsoup.parse("<table><tr><form id=g><input name=inside value=1></form>" +
+            "<td><input name=out value=2 form=g></td></tr></table>");
+        FormElement g = (FormElement) doc.getElementById("g");
+        assertEquals(Arrays.asList("inside=1", "out=2"), dataStrings(g.formData()));
+    }
+
+    @Test void controlsOrderedByFinalDocumentPosition() {
+        Document doc = Jsoup.parse("<body>" +
+            "<form id=f></form>" +
+            "<input name=z value=1 form=f>" +
+            "<div><input name=deep value=2 form=f></div>" +
+            "<input name=a value=3 form=f>" +
+            "</body>");
+        FormElement f = (FormElement) doc.getElementById("f");
+        assertEquals(Arrays.asList("z=1", "deep=2", "a=3"), dataStrings(f.formData()));
+    }
+
+    @Test void sameNamedControlsAreAllPreservedInOrder() {
+        Document doc = Jsoup.parse("<form id=f>" +
+            "<input name=x value=1><input name=x value=2><input name=x value=3></form>");
+        assertEquals(Arrays.asList("x=1", "x=2", "x=3"),
+            dataStrings(((FormElement) doc.getElementById("f")).formData()));
+    }
+
+    @Test void emptyFormAttributeIsNoOwner() {
+        Document doc = Jsoup.parse("<form id=f><input name=a value=1></form>" +
+            "<input name=b value=2 form=''>");
+        FormElement f = (FormElement) doc.getElementById("f");
+        assertEquals(1, f.formData().size());
+        assertEquals("a=1", f.formData().get(0).toString());
+    }
+
+    @Test void disabledFieldsetExcludesControlsButFirstLegendStaysActive() {
+        Document doc = Jsoup.parse("<form id=f>" +
+            "<fieldset disabled>" +
+              "<legend><input name=leg value=1></legend>" +
+              "<input name=body value=2>" +
+              "<legend><input name=secondLeg value=3></legend>" +
+              "<fieldset><input name=nested value=4></fieldset>" +
+            "</fieldset>" +
+            "<fieldset><input name=enabled value=5></fieldset>" +
+            "</form>");
+        assertEquals(Arrays.asList("leg=1", "enabled=5"),
+            dataStrings(((FormElement) doc.getElementById("f")).formData()));
+    }
+
+    @Test void disabledFieldsetDoesNotCrossFormOwnership() {
+        // external control owned by form a is not trapped by a disabled fieldset inside form b
+        Document doc = Jsoup.parse("<form id=a></form>" +
+            "<form id=b><fieldset disabled><input name=x value=1 form=a><input name=y value=2></fieldset></form>");
+        FormElement a = (FormElement) doc.getElementById("a");
+        FormElement b = (FormElement) doc.getElementById("b");
+        assertEquals(Collections.singletonList("x=1"), dataStrings(a.formData()));
+        assertTrue(b.formData().isEmpty());
+    }
+
+    @Test void singleSelectUsesFirstEnabledSelectedOrFirstEnabledOption() {
+        Document doc = Jsoup.parse("<form id=f>" +
+            "<select name=sel><option value=d disabled selected><option value=s2 selected><option value=s3 selected></select>" +
+            "<select name=fb><option value=d2 disabled><option value=ok></select>" +
+            "<select name=all><option disabled>a<option disabled>b</select>" +
+            "</form>");
+        assertEquals(Arrays.asList("sel=s2", "fb=ok"),
+            dataStrings(((FormElement) doc.getElementById("f")).formData()));
+    }
+
+    @Test void multipleSelectSubmitsAllEnabledSelectedOptions() {
+        Document doc = Jsoup.parse("<form id=f><select name=m multiple>" +
+            "<option value=1 selected>" +
+            "<option value=2 disabled selected>" +
+            "<option value=3 selected>" +
+            "<optgroup disabled><option value=4 selected></optgroup>" +
+            "<option value=5>" +
+            "</select><select name=none multiple></select></form>");
+        assertEquals(Arrays.asList("m=1", "m=3"),
+            dataStrings(((FormElement) doc.getElementById("f")).formData()));
+    }
+
+    @Test void optionWithoutValueSubmitsItsText() {
+        Document doc = Jsoup.parse("<form id=f><select name=s><option selected>Hello</option>" +
+            "<option value selected></select></form>");
+        assertEquals("s=Hello", ((FormElement) doc.getElementById("f")).formData().get(0).toString());
+    }
+
+    @Test void disabledOptionAndOptgroupAreUnavailable() {
+        Document doc = Jsoup.parse("<form id=f><select name=s multiple>" +
+            "<option disabled selected value=1>" +
+            "<optgroup disabled><option selected value=2></optgroup>" +
+            "<option selected value=3>" +
+            "</select></form>");
+        assertEquals(Collections.singletonList("s=3"),
+            dataStrings(((FormElement) doc.getElementById("f")).formData()));
+    }
+
+    @Test void radioAndCheckboxOnlySubmitWhenChecked() {
+        Document doc = Jsoup.parse("<form id=f>" +
+            "<input type=checkbox name=cb checked>" +
+            "<input type=checkbox name=cboff>" +
+            "<input type=radio name=r checked value=RV>" +
+            "<input type=radio name=roff value=X>" +
+            "</form>");
+        assertEquals(Arrays.asList("cb=on", "r=RV"),
+            dataStrings(((FormElement) doc.getElementById("f")).formData()));
+    }
+
+    @Test void textAndTextareaValuesDoNotRegress() {
+        Document doc = Jsoup.parse("<form id=f><input name=t value=''><textarea name=ta></textarea>" +
+            "<input type=hidden name=h value=''><textarea name=ta2>body text</textarea></form>");
+        assertEquals(Arrays.asList("t=", "ta=", "h=", "ta2=body text"),
+            dataStrings(((FormElement) doc.getElementById("f")).formData()));
+    }
+
+    @Test void formDataReflectsDeletionDetachAndReassignment() {
+        Document doc = Jsoup.parse("<body><form id=n><input name=k1 value=v1></form>" +
+            "<input name=k2 value=v2 form=n></body>");
+        FormElement n = (FormElement) doc.getElementById("n");
+        assertEquals(Arrays.asList("k1=v1", "k2=v2"), dataStrings(n.formData()));
+
+        doc.selectFirst("input[name=k1]").remove();
+        assertEquals(Collections.singletonList("k2=v2"), dataStrings(n.formData()));
+
+        Element k2 = doc.selectFirst("input[name=k2]");
+        k2.attr("form", "zzz"); // invalid id: control now has no owner
+        assertTrue(n.formData().isEmpty());
+
+        doc.body().append("<form id=p></form>");
+        k2.attr("form", "p"); // reassigned to a new form
+        assertTrue(n.formData().isEmpty());
+        assertEquals(Collections.singletonList("k2=v2"),
+            dataStrings(((FormElement) doc.getElementById("p")).formData()));
+
+        k2.removeAttr("form"); // outside of form, no attribute: no owner
+        assertTrue(n.formData().isEmpty());
+
+        n.appendChild(k2); // moved back into form
+        assertEquals(Collections.singletonList("k2=v2"), dataStrings(n.formData()));
+    }
+
+    @Test void returnedFormDataIsAnIndependentCopy() {
+        Document doc = Jsoup.parse("<form id=f><input name=z value=1><input name=z value=2></form>");
+        FormElement f = (FormElement) doc.getElementById("f");
+        List<Connection.KeyVal> first = f.formData();
+        first.clear();
+        assertEquals(Arrays.asList("z=1", "z=2"), dataStrings(f.formData()));
+    }
+
+    @Test void emptyFormReturnsGenuinelyEmptyList() {
+        Document doc = Jsoup.parse("<form id=e></form>");
+        FormElement e = (FormElement) doc.getElementById("e");
+        assertNotNull(e.formData());
+        assertTrue(e.formData().isEmpty());
+    }
+
+    @Test void readingFormDataDoesNotMutateTheDocument() {
+        String html = "<body><form id=f><input name=a value=1></form><input name=b value=2 form=f></body>";
+        Document doc = Jsoup.parse(html);
+        String before = doc.toString();
+        FormElement f = (FormElement) doc.getElementById("f");
+        f.formData();
+        f.formData();
+        assertEquals(before, doc.toString());
+        assertEquals(2, doc.select("input").size());
+        assertNotNull(doc.selectFirst("input[name=b]"));
+    }
+
+    @Test void malformedAndDeeplyNestedDisabledStructuresDoNotThrow() {
+        String html = "<form id=f>" +
+            "<fieldset disabled><fieldset disabled><legend>" +
+            "<fieldset disabled><input name=x value=1></fieldset>" +
+            "</legend></fieldset></fieldset>" +
+            "<select name=s><option value=1 selected><option selected><optgroup><option selected></optgroup>" +
+            "<div><option value=deep selected></div></select>" +
+            "</form>";
+        Document doc = Jsoup.parse(html);
+        List<Connection.KeyVal> data = ((FormElement) doc.getElementById("f")).formData();
+        // x is trapped by the inner disabled fieldset even though inside the outer fieldset's legend
+        assertEquals("s=1", data.get(0).toString());
+        assertEquals(1, data.size());
     }
 }
