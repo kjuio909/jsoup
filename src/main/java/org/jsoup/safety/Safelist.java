@@ -19,9 +19,6 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 
-import static org.jsoup.internal.Normalizer.lowerCase;
-
-
 /**
  Safelists define what HTML (elements and attributes) to allow through a {@link Cleaner}. Everything else is removed.
  <p>
@@ -536,7 +533,7 @@ public class Safelist {
             if (protocols.containsKey(tag)) {
                 Map<AttributeKey, Set<Protocol>> attrProts = protocols.get(tag);
                 // ok if not defined protocol; otherwise test
-                return !attrProts.containsKey(key) || isSafeProtocol(getProtocolValue(el, attr), attrProts.get(key));
+                return !attrProts.containsKey(key) || isSafeAttributeProtocol(el, attr, attrProts.get(key));
             } else { // attribute found, no protocols defined, so OK
                 return true;
             }
@@ -551,33 +548,174 @@ public class Safelist {
         return !tagName.equals(All) && isSafeAttribute(All, el, attr);
     }
 
-    private String getProtocolValue(Element el, Attribute attr) {
-        String value = el.absUrl(attr.getKey());
-        if (value.isEmpty() && !StringUtil.hasHttpScheme(attr.getValue()))
-            value = attr.getValue(); // if it could not be made abs, run as-is to allow custom unknown protocols
-        return value;
-    }
-
-    private boolean isSafeProtocol(String value, Set<Protocol> protocols) {
-        for (Protocol protocol : protocols) {
-            String prot = protocol.toString();
-
-            if (prot.equals("#")) { // allows anchor links
-                if (isValidAnchor(value)) {
-                    return true;
-                } else {
-                    continue;
+    /**
+     Test that every URL candidate carried by the attribute value uses an allowed protocol. Single-valued URL
+     attributes have one candidate; comma-separated attributes such as {@code srcset} may carry several, and a single
+     dangerous candidate must not be smuggled through beside safe ones.
+     */
+    private boolean isSafeAttributeProtocol(Element el, Attribute attr, Set<Protocol> protocols) {
+        String baseUri = el == null ? "" : el.baseUri();
+        String value = attr.getValue();
+        if (multiValueUrlAttribute(attr.getKey())) {
+            int len = value.length();
+            int start = 0;
+            boolean found = false;
+            for (int i = 0; i <= len; i++) {
+                if (i == len || value.charAt(i) == ',') {
+                    String candidate = stripCandidateDescriptor(value.substring(start, i));
+                    if (!candidate.isEmpty()) {
+                        if (!isSafeUrlCandidate(candidate, protocols, baseUri)) return false;
+                        found = true;
+                    }
+                    start = i + 1;
                 }
             }
+            return found; // an empty value has no candidates to enforce a protocol on
+        }
+        return isSafeUrlCandidate(value, protocols, baseUri);
+    }
 
-            String lc = lowerCase(value);
-            if (lc.startsWith(prot)
-                && lc.length() > prot.length()
-                && lc.charAt(prot.length()) == ':') {
-                return true;
+    /**
+     Validate one URL candidate against the allowed protocol set. The candidate's own (trimmed) value determines its
+     scheme -- a resolved absolute URL is never trusted to vouch for a different raw spelling, because in
+     preserve-relative-links mode the raw value is what gets emitted.
+     */
+    private boolean isSafeUrlCandidate(String raw, Set<Protocol> protocols, String baseUri) {
+        // ignore the leading/trailing ASCII whitespace (SP, TAB, LF, CR, FF) that browsers also strip from URLs
+        int start = 0;
+        int end = raw.length();
+        while (start < end && isHtmlWhitespace(raw.charAt(start))) start++;
+        while (end > start && isHtmlWhitespace(raw.charAt(end - 1))) end--;
+        if (start == end) return false;
+        String value = raw.substring(start, end);
+
+        // Per RFC 3986 a scheme is terminated by the first ':' that precedes any '/', '?' or '#'.
+        int colon = -1;
+        for (int i = 0; i < value.length(); i++) {
+            char c = value.charAt(i);
+            if (c == ':') { colon = i; break; }
+            if (c == '/' || c == '?' || c == '#') break; // path/query/fragment starts first: no scheme
+        }
+
+        if (colon > 0) {
+            String scheme = value.substring(0, colon);
+            if (isSchemeGrammar(scheme)) {
+                for (Protocol protocol : protocols) {
+                    String prot = protocol.toString();
+                    if (prot.equals("#")) continue;
+                    // exact ASCII scheme match, and the value must actually resolve, so a hostless "https:/foo"
+                    // against a mismatched base is still dropped
+                    if (isAllowedScheme(scheme, prot) && !StringUtil.resolve(baseUri, value).isEmpty()) return true;
+                }
+                return false; // a well-formed but disallowed scheme (javascript:, data:, vbscript: ...)
             }
+            if (hasSmuggledSchemeBytes(scheme)) {
+                // not a valid scheme but carrying scheme-smuggling bytes -- percent escapes ("%6Aavascript:" /
+                // "java%73cript:"), backslashes, embedded whitespace / control / non-ASCII characters. Fail closed
+                // rather than silently resolving it as a (possibly browser-rewritten) relative URL.
+                return false;
+            }
+            // otherwise (e.g. "123:45") it is a relative reference; fall through to resolution
+        }
+
+        // no scheme: an in-page anchor, or a relative reference resolved against the base URI
+        for (Protocol protocol : protocols) {
+            if (protocol.toString().equals("#") && isValidAnchor(value)) return true;
+        }
+        if (!isSafeRelativeReference(value)) return false; // malformed: control/format/Unicode-whitespace characters
+        String resolved = StringUtil.resolve(baseUri, value);
+        if (resolved.isEmpty()) return false; // unresolvable relative link (e.g. no base URI configured)
+        int resolvedColon = resolved.indexOf(':');
+        if (resolvedColon <= 0) return false;
+        String resolvedScheme = resolved.substring(0, resolvedColon);
+        for (Protocol protocol : protocols) {
+            String prot = protocol.toString();
+            if (!prot.equals("#") && isAllowedScheme(resolvedScheme, prot)) return true;
         }
         return false;
+    }
+
+    /**
+     A scheme-less reference is rejected when it carries ASCII control characters (C0 / DEL), Unicode formatting
+     characters (such as bidi controls or zero-width spaces), or Unicode line/paragraph/space separators; ordinary
+     spaces and percent-encoding in a path or query are still allowed. Anything else is resolved as a relative URL.
+     */
+    private static boolean isSafeRelativeReference(String value) {
+        for (int i = 0; i < value.length(); i++) {
+            char c = value.charAt(i);
+            if (c < ' ' || c == 0x7f) return false; // C0 controls and DEL (ordinary space 0x20 is permitted)
+            if (c > 0x7f) {
+                int type = Character.getType(c);
+                if (type == Character.CONTROL || type == Character.FORMAT
+                    || type == Character.SPACE_SEPARATOR || type == Character.LINE_SEPARATOR
+                    || type == Character.PARAGRAPH_SEPARATOR) return false;
+            }
+        }
+        return true;
+    }
+
+    private static boolean isAsciiAlpha(char c) {
+        return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z');
+    }
+
+    /**
+     Detects bytes that are never legal inside an RFC 3986 scheme but are routinely used to disguise a scheme so a
+     browser decodes or strips it after validation: percent escapes, backslashes, ASCII whitespace/control
+     characters, or any non-ASCII character (including Unicode whitespace and formatting marks).
+     */
+    private static boolean hasSmuggledSchemeBytes(String scheme) {
+        for (int i = 0; i < scheme.length(); i++) {
+            char c = scheme.charAt(i);
+            if (c == '%' || c == '\\' || c <= ' ' || c == 0x7f || c > 0x7e) return true;
+        }
+        return false;
+    }
+
+    /** RFC 3986 scheme grammar: ALPHA *( ALPHA / DIGIT / "+" / "-" / "." ). */
+    private static boolean isSchemeGrammar(String scheme) {
+        int len = scheme.length();
+        if (len == 0 || !isAsciiAlpha(scheme.charAt(0))) return false;
+        for (int i = 1; i < len; i++) {
+            char c = scheme.charAt(i);
+            if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
+                || c == '+' || c == '-' || c == '.')) return false;
+        }
+        return true;
+    }
+
+    /** ASCII-case-insensitive match of a scheme that is already known to satisfy {@link #isSchemeGrammar}. */
+    private static boolean isAllowedScheme(String scheme, String allowed) {
+        int len = scheme.length();
+        if (len != allowed.length()) return false;
+        for (int i = 0; i < len; i++) {
+            char c = scheme.charAt(i);
+            if (c >= 'A' && c <= 'Z') c = (char) (c + ('a' - 'A')); // ASCII case folding only
+            if (c != allowed.charAt(i)) return false;
+        }
+        return true;
+    }
+
+    private static boolean isHtmlWhitespace(char c) {
+        return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f';
+    }
+
+    /**
+     URL attributes whose value may contain a comma-separated list of candidate URLs (each optionally followed by a
+     whitespace and a descriptor). Every candidate is validated independently.
+     */
+    static boolean multiValueUrlAttribute(String key) {
+        String lc = Normalizer.lowerCase(key);
+        return lc.equals("srcset") || lc.equals("imagesrcset");
+    }
+
+    /** For a srcset candidate ("url 1x" or "url 200w"), returns just the URL portion. */
+    private static String stripCandidateDescriptor(String candidate) {
+        int len = candidate.length();
+        int i = 0;
+        while (i < len && isHtmlWhitespace(candidate.charAt(i))) i++;
+        int start = i;
+        while (i < len && !isHtmlWhitespace(candidate.charAt(i))) i++;
+        return candidate.substring(start, i);
     }
 
     /**

@@ -357,7 +357,7 @@ public final class StringUtil {
         return colon > 0 && isHttpScheme(value.substring(0, colon));
     }
 
-    private static final Pattern controlChars = Pattern.compile("[\\x00-\\x1f]*"); // matches ascii 0 - 31, to strip from url
+    private static final Pattern controlChars = Pattern.compile("[\\x00-\\x1f\\x7f]*"); // matches C0 controls and DEL, to strip from url
     private static String stripControlChars(final String input) {
         return controlChars.matcher(input).replaceAll("");
     }

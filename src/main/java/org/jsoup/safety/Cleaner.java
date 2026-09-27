@@ -12,6 +12,7 @@ import org.jsoup.nodes.Range;
 import org.jsoup.nodes.TextNode;
 import org.jsoup.parser.ParseErrorList;
 import org.jsoup.parser.Parser;
+import org.jsoup.internal.StringUtil;
 import org.jsoup.select.NodeVisitor;
 
 import java.net.MalformedURLException;
@@ -199,9 +200,13 @@ public class Cleaner {
                 String value = sourceAttr.getValue();
 
                 if (safelist.shouldAbsUrl(sourceTag, key)) { // configured to make absolute urls for this key (href)
-                    value = sourceEl.absUrl(key);
-                    if (value.isEmpty()) // could not be made abs; leave as-is to allow custom unknown protocols
-                        value = sourceAttr.getValue();
+                    if (Safelist.multiValueUrlAttribute(key)) { // srcset etc: resolve each candidate independently
+                        value = resolveCandidateUrls(sourceEl, value);
+                    } else {
+                        value = sourceEl.absUrl(key);
+                        if (value.isEmpty()) // could not be made abs; leave as-is to allow custom unknown protocols
+                            value = sourceAttr.getValue();
+                    }
                 }
                 Range.AttributeRange range = sourceAttrs.sourceRange(key);
                 destAttrs.put(key, value);
@@ -232,6 +237,52 @@ public class Cleaner {
         }
         dest.attributes().addAll(destAttrs); // re-attach, if removed in clear
         return new ElementMeta(dest, numDiscarded);
+    }
+
+    private static boolean isHtmlWhitespace(char c) {
+        return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f';
+    }
+
+    /**
+     Resolve each comma-separated candidate URL (e.g. in a {@code srcset} attribute) against the element's base URI,
+     preserving the candidate descriptors and the original separators. Returns the source value untouched when none of
+     the candidates changed, so that already-normalized output is stable on a second clean.
+     */
+    private String resolveCandidateUrls(Element sourceEl, String value) {
+        String baseUri = sourceEl.baseUri();
+        int len = value.length();
+        StringBuilder out = null;
+        int start = 0;
+        for (int i = 0; i <= len; i++) {
+            if (i != len && value.charAt(i) != ',') continue;
+
+            String segment = value.substring(start, i);
+            int segLen = segment.length();
+            int urlStart = 0;
+            while (urlStart < segLen && isHtmlWhitespace(segment.charAt(urlStart))) urlStart++;
+            int urlEnd = urlStart;
+            while (urlEnd < segLen && !isHtmlWhitespace(segment.charAt(urlEnd))) urlEnd++;
+
+            boolean changed = false;
+            if (urlEnd > urlStart) {
+                String candidate = segment.substring(urlStart, urlEnd);
+                String resolved = StringUtil.resolve(baseUri, candidate);
+                if (resolved.isEmpty()) resolved = candidate; // mirror single-URL behavior: leave unresolvable as-is
+                if (!resolved.equals(candidate)) {
+                    changed = true;
+                    if (out == null) {
+                        out = new StringBuilder(len + 16);
+                        out.append(value, 0, start); // everything before the first changed candidate, flushed once
+                    }
+                    out.append(segment, 0, urlStart).append(resolved).append(segment, urlEnd, segLen);
+                }
+            }
+            if (!changed && out != null) out.append(segment);
+            if (out != null && i < len) out.append(',');
+
+            start = i + 1;
+        }
+        return out == null ? value : out.toString();
     }
 
     private static class ElementMeta {
