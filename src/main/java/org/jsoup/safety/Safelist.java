@@ -678,6 +678,7 @@ public class Safelist {
         int urlEnd = start;
         while (urlEnd < end && !isSrcsetSpace(value.charAt(urlEnd))) urlEnd++;
         String url = value.substring(start, urlEnd);
+        if (isOrphanDescriptor(url)) return; // a descriptor cannot stand in for the required URL
 
         // an optional descriptor may follow, introduced by at least one ASCII space
         String descriptor = null;
@@ -820,6 +821,33 @@ public class Safelist {
             if (decoded != null) decoded.append(c);
         }
         return decoded != null ? decoded.toString() : url;
+    }
+
+    /**
+     * Tests if a candidate's first (and only) whitespace-delimited token is a descriptor with no URL in front of it,
+     * rather than a relative URL. Such an orphan has the <i>shape</i> of a width or density descriptor: a lowercase
+     * {@code w} or {@code x} suffix, an optional single leading sign, and a non-empty remaining run of only digits and
+     * dots, e.g. {@code 2x}, {@code 100w}, {@code 1.5x}, {@code 0w}, {@code -1x}, {@code +1x}, {@code 1.x},
+     * {@code .5x}, or {@code 1.5.2x}. This is a purely syntactic shape test (it does not require the number to be
+     * valid), because a token that can only be read as a descriptor attempt supplies no decidable URL. A genuine
+     * relative reference always carries something a descriptor number can never hold — another letter
+     * ({@code 1e3x}, {@code 1X}, {@code 2x.jpg}), a path separator ({@code ../2x}), or an internal or second sign
+     * ({@code 1-2x}, {@code ++2x}) — and so is never mistaken for an orphan.
+     */
+    private static boolean isOrphanDescriptor(String token) {
+        int length = token.length();
+        if (length < 2) return false; // a bare "w"/"x" is a possible relative reference, not a descriptor attempt
+        char suffix = token.charAt(length - 1);
+        if (suffix != 'w' && suffix != 'x') return false;
+        int i = 0;
+        if (token.charAt(0) == '+' || token.charAt(0) == '-') i++; // at most one, leading sign
+        if (i == length - 1) return false; // just a sign and suffix (e.g. "+w"): a relative reference, not a number
+        for (; i < length - 1; i++) {
+            char c = token.charAt(i);
+            boolean numberChar = (c >= '0' && c <= '9') || c == '.';
+            if (!numberChar) return false; // a letter, separator, or internal sign marks a real URL
+        }
+        return true;
     }
 
     /**

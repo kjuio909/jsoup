@@ -873,6 +873,45 @@ public class CleanerTest {
         assertEquals("<img srcset=\"b.jpg 1x\">", Jsoup.clean("<img srcset='a.jpg\t1x, b.jpg 1x'>", safelist));
     }
 
+    @Test void srcsetOrphanDescriptorsDropped() {
+        // A candidate must carry a URL; a descriptor sitting in the URL position (with no URL before it) invalidates
+        // just that candidate, whether or not its number is itself a legal descriptor value.
+        Safelist safelist = Safelist.basicWithImages()
+            .addAttributes("img", "srcset")
+            .addProtocols("img", "srcset", "http", "https")
+            .preserveRelativeLinks(true);
+
+        // well-formed descriptors standing alone are orphans, not relative URLs
+        assertEquals("<img srcset=\"https://ok.com/x 1x\">", Jsoup.clean(
+            "<img srcset='2x, 100w, 1.5x, 01w, https://ok.com/x 1x'>", "https://example.com/page/", safelist));
+
+        // malformed descriptor-shaped tokens are orphans too; only the surrounding safe candidates survive
+        assertEquals("<img srcset=\"a.jpg 1x, https://ok.com/z\">", Jsoup.clean(
+            "<img srcset='a.jpg 1x, 0w, 0x, -1x, +1x, 1.x, .5x, 1.5.2x, .x, +.5x, -.0w, https://ok.com/z'>",
+            "https://example.com/page/", safelist));
+
+        // an orphan introduced after whitespace, or at the end, leaves no dangling descriptor or comma
+        assertEquals("<img srcset=\"https://ok.com/x\">",
+            Jsoup.clean("<img srcset=' 100w, https://ok.com/x'>", "https://example.com/page/", safelist));
+        assertEquals("<img srcset=\"a.jpg 2x\">",
+            Jsoup.clean("<img srcset='a.jpg 2x, 3x'>", "https://example.com/page/", safelist));
+
+        // when every candidate is an orphan, the whole attribute is removed
+        assertEquals("<img>", Jsoup.clean("<img srcset='2x, 100w, 0w'>", "https://example.com/page/", safelist));
+
+        // genuine relative references that merely resemble descriptors are kept: another letter (1e3x, 1X), a
+        // path/extension (../2x, 2x.jpg), an internal or doubled sign (1-2x, 1+2x, ++2x), a sign with no number
+        // (+w, -x), or a single letter with no number (x, w) are all URLs, not descriptors
+        assertEquals("<img srcset=\"1e3x, 1X, ../2x, 2x.jpg, 1-2x, 1+2x, ++2x, +w, -x, x, w\">", Jsoup.clean(
+            "<img srcset='1e3x, 1X, ../2x, 2x.jpg, 1-2x, 1+2x, ++2x, +w, -x, x, w'>",
+            "https://example.com/page/", safelist));
+
+        // re-cleaning the normalized result is stable
+        String once = Jsoup.clean("<img srcset='2x, a.jpg 1x, 100w'>", "https://example.com/page/", safelist);
+        assertEquals("<img srcset=\"a.jpg 1x\">", once);
+        assertEquals(once, Jsoup.clean(once, "https://example.com/page/", safelist));
+    }
+
     @Test void srcsetRemovedWhenNoCandidatesSurvive() {
         Safelist safelist = Safelist.basicWithImages()
             .addAttributes("img", "srcset")
