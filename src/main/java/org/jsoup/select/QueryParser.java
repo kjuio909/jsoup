@@ -53,6 +53,25 @@ public class QueryParser implements AutoCloseable {
      */
     public static Evaluator parse(String query) {
         try (QueryParser p = new QueryParser(query)) {
+            Evaluator eval = p.parse();
+            // :scope may appear at most once per selector; each nested :has() is checked as its own anchor layer
+            StructuralEvaluator.validateScopeUsage(eval);
+            // when the query names :scope, widen collection to the anchor's following siblings when a branch needs them
+            if (StructuralEvaluator.referencesScope(eval))
+                eval = new StructuralEvaluator.ScopedRoot(eval);
+            return eval;
+        } catch (IllegalArgumentException e) {
+            throw new Selector.SelectorParseException(e.getMessage());
+        }
+    }
+
+    /**
+     * Parse a nested selector fragment (e.g. the argument of {@code :not(...)} or the {@code of S} clause) without the
+     * top-level {@code :scope} wrapping. The scope anchoring and multiple-{@code :scope} validation are applied once,
+     * over the whole parsed tree, by the enclosing {@link #parse(String)}.
+     */
+    private static Evaluator parseFragment(String query) {
+        try (QueryParser p = new QueryParser(query)) {
             return p.parse();
         } catch (IllegalArgumentException e) {
             throw new Selector.SelectorParseException(e.getMessage());
@@ -259,6 +278,8 @@ public class QueryParser implements AutoCloseable {
                 return new NodeEvaluator.BlankValue();
             case "root":
                 return new Evaluator.IsRoot();
+            case "scope":
+                return new StructuralEvaluator.ScopeRef();
             case "matchText": {
                 @SuppressWarnings("deprecation") // :matchText remains supported until its scheduled removal.
                 Evaluator.MatchText matchText = new Evaluator.MatchText();
@@ -430,7 +451,7 @@ public class QueryParser implements AutoCloseable {
         Evaluator filter = null;
         if (ofPart != null) {
             Validate.notEmpty(ofPart, ":nth-child(An+B of S) requires a selector after 'of'");
-            filter = parse(ofPart); // a selector list, parsed by the same grammar (and validated in full)
+            filter = parseFragment(ofPart); // a selector list, parsed by the same grammar (and validated in full)
         }
 
         if (ofType)
@@ -570,7 +591,7 @@ public class QueryParser implements AutoCloseable {
         String subQuery = consumeParens();
         Validate.notEmpty(subQuery, ":not(selector) subselect must not be empty");
 
-        return new StructuralEvaluator.Not(parse(subQuery));
+        return new StructuralEvaluator.Not(parseFragment(subQuery));
     }
 
     @Override

@@ -46,6 +46,13 @@ public class Collector {
      */
     public static Stream<Element> stream(Evaluator evaluator, Element root) {
         evaluator.reset();
+        if (evaluator instanceof StructuralEvaluator.ScopedRoot) {
+            // a :scope query may match the anchor itself, its subtree, or its following siblings
+            return ((StructuralEvaluator.ScopedRoot) evaluator).scopedStream(root)
+                .filter(node -> node instanceof Element)
+                .map(Element.class::cast)
+                .filter(evaluator.asPredicate(root));
+        }
         return root.stream().filter(evaluator.asPredicate(root));
     }
 
@@ -62,6 +69,13 @@ public class Collector {
      */
     public static <T extends Node> Stream<T> streamNodes(Evaluator evaluator, Element root, Class<T> type) {
         evaluator.reset();
+        if (evaluator instanceof StructuralEvaluator.ScopedRoot) {
+            // a :scope query may match within the anchor subtree, or within a following sibling's subtree
+            return ((StructuralEvaluator.ScopedRoot) evaluator).scopedStream(root)
+                .filter(type::isInstance)
+                .map(type::cast)
+                .filter(evaluator.asNodePredicate(root));
+        }
         return root.nodeStream(type).filter(evaluator.asNodePredicate(root));
     }
 
