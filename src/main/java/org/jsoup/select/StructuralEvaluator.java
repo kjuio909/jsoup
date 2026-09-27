@@ -95,6 +95,7 @@ abstract class StructuralEvaluator extends Evaluator {
         private final Evaluator[] branches; // each comma-separated relative branch
         private final char[] axes;          // axis per branch: 0 = descendants, '+' / '~' = following element siblings
         private final boolean[] deep;       // sibling branches that chain a further combinator and so must search subtrees
+        private final boolean[] selfScope;  // descendant-axis branches whose :scope may match the anchor itself
 
         public Has(Evaluator evaluator) {
             super(evaluator);
@@ -108,9 +109,13 @@ abstract class StructuralEvaluator extends Evaluator {
             branches = clauses.toArray(new Evaluator[0]);
             axes = new char[branches.length];
             deep = new boolean[branches.length];
+            selfScope = new boolean[branches.length];
             for (int i = 0; i < branches.length; i++) {
                 axes[i] = siblingAxis(branches[i]);
                 deep[i] = axes[i] != 0 && hasChainedCombinator(branches[i]);
+                // a sibling branch can never match the anchor itself; a descendant branch may when its relationship
+                // starts (or stays) at the :scope anchor, as in :has(:scope), :has(:scope.x), or :has(p:scope)
+                selfScope[i] = axes[i] == 0 && ScopeSelector.usesScope(branches[i]);
             }
         }
 
@@ -118,6 +123,9 @@ abstract class StructuralEvaluator extends Evaluator {
             for (int i = 0; i < branches.length; i++) {
                 Evaluator branch = branches[i];
                 if (axes[i] == 0) {
+                    // a :scope at this level binds to the anchor itself, so a scope-headed branch with no leading
+                    // combinator may match the anchor (e.g. :has(:scope.x)); every other branch stays descendant-only
+                    if (selfScope[i] && branch.matches(element, element)) return true;
                     if (matchesDescendants(element, branch)) return true;
                 } else {
                     if (matchesFollowingSiblings(element, axes[i], deep[i], branch)) return true;
@@ -204,11 +212,11 @@ abstract class StructuralEvaluator extends Evaluator {
                     edge = ((Ancestor) edge).evaluator;
                 } else if (edge instanceof ImmediatePreviousSibling) {
                     Evaluator left = ((StructuralEvaluator) edge).evaluator;
-                    if (left instanceof Root) return '+';
+                    if (left instanceof Root || ScopeSelector.isScopeAnchor(left)) return '+';
                     edge = left; // a chained sibling combinator; continue to the left-most edge
                 } else if (edge instanceof PreviousSibling) {
                     Evaluator left = ((StructuralEvaluator) edge).evaluator;
-                    if (left instanceof Root) return '~';
+                    if (left instanceof Root || ScopeSelector.isScopeAnchor(left)) return '~';
                     edge = left;
                 } else {
                     return 0; // bare branch, or a leading '>' (a Root)
@@ -225,8 +233,10 @@ abstract class StructuralEvaluator extends Evaluator {
         private static boolean hasChainedCombinator(Evaluator eval) {
             if (eval instanceof Ancestor) return true;
             if (eval instanceof ImmediateParentRun) return ((ImmediateParentRun) eval).evaluators.size() > 1;
-            if (eval instanceof ImmediatePreviousSibling || eval instanceof PreviousSibling)
-                return !(((StructuralEvaluator) eval).evaluator instanceof Root); // the leading axis edge wraps Root
+            if (eval instanceof ImmediatePreviousSibling || eval instanceof PreviousSibling) {
+                Evaluator left = ((StructuralEvaluator) eval).evaluator;
+                return !(left instanceof Root || ScopeSelector.isScopeAnchor(left)); // leading axis edge wraps the anchor
+            }
             if (eval instanceof CombiningEvaluator) {
                 for (Evaluator child : ((CombiningEvaluator) eval).evaluators) {
                     if (hasChainedCombinator(child)) return true;

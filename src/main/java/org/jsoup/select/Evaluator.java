@@ -771,6 +771,26 @@ public abstract class Evaluator {
     }
 
     /**
+     * css3 pseudo-class :scope
+     * @see <a href="https://www.w3.org/TR/selectors-4/#the-scope-pseudo">:scope selector</a>
+     */
+    public static final class IsScope extends Evaluator {
+        @Override
+        public boolean matches(Element root, Element element) {
+            return element == root;
+        }
+
+        @Override protected int cost() {
+            return 1;
+        }
+
+        @Override
+        public String toString() {
+            return ":scope";
+        }
+    }
+
+    /**
      * css3 pseudo-class :root
      * @see <a href="http://www.w3.org/TR/selectors/#root-pseudo">:root selector</a>
      *

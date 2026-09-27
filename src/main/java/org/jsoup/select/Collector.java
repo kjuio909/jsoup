@@ -38,6 +38,10 @@ public class Collector {
 
     /**
      Obtain a Stream of elements by visiting the root and every descendant of root and testing it against the evaluator.
+     When a branch uses a top-level {@code :scope} sibling combinator ({@code :scope + ...} or {@code :scope ~ ...}),
+     that branch is additionally tested against the root's following element siblings and their descendants; the two
+     domains are disjoint and concatenated in document order. All other branches (including branches in the same query)
+     stay confined to the root and its descendants, preserving the historical descendants-only search behavior.
 
      @param evaluator Evaluator to test elements against
      @param root root of tree to descend
@@ -46,7 +50,12 @@ public class Collector {
      */
     public static Stream<Element> stream(Evaluator evaluator, Element root) {
         evaluator.reset();
-        return root.stream().filter(evaluator.asPredicate(root));
+        Evaluator siblingEval = ScopeSelector.siblingBranches(evaluator);
+        Stream<Element> rootDomain = root.stream().filter(evaluator.asPredicate(root));
+        if (siblingEval == null)
+            return rootDomain;
+        Stream<Element> siblingDomain = ScopeSelector.siblingElements(siblingEval, root).filter(siblingEval.asPredicate(root));
+        return Stream.concat(rootDomain, siblingDomain);
     }
 
     /**
@@ -62,7 +71,12 @@ public class Collector {
      */
     public static <T extends Node> Stream<T> streamNodes(Evaluator evaluator, Element root, Class<T> type) {
         evaluator.reset();
-        return root.nodeStream(type).filter(evaluator.asNodePredicate(root));
+        Evaluator siblingEval = ScopeSelector.siblingBranches(evaluator);
+        Stream<T> rootDomain = root.nodeStream(type).filter(evaluator.asNodePredicate(root));
+        if (siblingEval == null)
+            return rootDomain;
+        Stream<T> siblingDomain = ScopeSelector.siblingNodes(siblingEval, root, type).filter(siblingEval.asNodePredicate(root));
+        return Stream.concat(rootDomain, siblingDomain);
     }
 
     /**

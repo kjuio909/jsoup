@@ -79,6 +79,7 @@ public class QueryParser implements AutoCloseable {
         tq.consumeWhitespace();
         if (!tq.isEmpty())
             throw new Selector.SelectorParseException("Could not parse query '%s': unexpected token at '%s'", query, tq.remainder());
+        ScopeSelector.validate(eval, query);
         return eval;
     }
 
@@ -259,6 +260,8 @@ public class QueryParser implements AutoCloseable {
                 return new NodeEvaluator.BlankValue();
             case "root":
                 return new Evaluator.IsRoot();
+            case "scope":
+                return new Evaluator.IsScope();
             case "matchText": {
                 @SuppressWarnings("deprecation") // :matchText remains supported until its scheduled removal.
                 Evaluator.MatchText matchText = new Evaluator.MatchText();
