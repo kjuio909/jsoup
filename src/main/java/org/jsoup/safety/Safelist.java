@@ -678,6 +678,7 @@ public class Safelist {
         int urlEnd = start;
         while (urlEnd < end && !isSrcsetSpace(value.charAt(urlEnd))) urlEnd++;
         String url = value.substring(start, urlEnd);
+        if (isOrphanDescriptor(url)) return; // a descriptor in the URL position means the candidate has no URL
 
         // an optional descriptor may follow, introduced by at least one ASCII space
         String descriptor = null;
@@ -820,6 +821,29 @@ public class Safelist {
             if (decoded != null) decoded.append(c);
         }
         return decoded != null ? decoded.toString() : url;
+    }
+
+    /**
+     Tests if a candidate's leading token is really an orphaned descriptor (e.g. {@code 1x}, {@code 100w},
+     {@code 0w}, {@code -1x}, {@code 1.x}, or a bare {@code w}) sitting where the URL should be. Such a
+     candidate has no URL and is dropped rather than being treated as a relative reference. A token that
+     contains any other character (e.g. {@code dir/1x} or {@code 1e3x}) is a URL, not a descriptor.
+     */
+    private static boolean isOrphanDescriptor(String token) {
+        int length = token.length();
+        if (length == 0) return false;
+        char suffix = token.charAt(length - 1);
+        boolean descSuffix = suffix == 'w' || suffix == 'x' || suffix == 'W' || suffix == 'X';
+        if (!descSuffix) return false;
+        if (length == 1) return true; // a bare "w" / "x" has no URL at all
+        boolean sawDigit = false;
+        for (int i = 0; i < length - 1; i++) {
+            char c = token.charAt(i);
+            boolean numberChar = (c >= '0' && c <= '9') || c == '.' || c == '+' || c == '-';
+            if (!numberChar) return false; // anything else (e.g. '/', 'e', a letter) makes it an ordinary URL
+            if (c >= '0' && c <= '9') sawDigit = true;
+        }
+        return sawDigit; // ".x" or "+x" alone are not descriptor-shaped and remain URLs
     }
 
     /**

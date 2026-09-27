@@ -873,6 +873,95 @@ public class CleanerTest {
         assertEquals("<img srcset=\"b.jpg 1x\">", Jsoup.clean("<img srcset='a.jpg\t1x, b.jpg 1x'>", safelist));
     }
 
+    @Test void srcsetOrphanDescriptorsDropped() {
+        Safelist safelist = srcsetSafelist().preserveRelativeLinks(true);
+
+        // a descriptor sitting where the URL should be is an orphan: the candidate has no URL and is dropped,
+        // but it is never spliced together with the following URL
+        assertEquals("<img srcset=\"http://ok.example/a.jpg 2x\">",
+            Jsoup.clean("<img srcset='1x, http://ok.example/a.jpg 2x'>", "https://e.com/", safelist));
+        assertEquals("<img srcset=\"http://ok.example/a.jpg 1x, http://ok.example/b.jpg 3x\">",
+            Jsoup.clean("<img srcset='http://ok.example/a.jpg 1x, 2x, http://ok.example/b.jpg 3x'>", "https://e.com/", safelist));
+        assertEquals("<img srcset=\"http://ok.example/b.jpg 2x\">",
+            Jsoup.clean("<img srcset='1x 2x, http://ok.example/b.jpg 2x'>", "https://e.com/", safelist));
+
+        // malformed-number descriptors in the URL position are orphans too, not relative URLs
+        assertEquals("<img srcset=\"http://ok.example/a.jpg\">", Jsoup.clean(
+            "<img srcset='0w, 0x, 0.0x, -1x, +1x, 1.x, .5x, 1.5.2x, w, x, 100W, 2X, http://ok.example/a.jpg'>",
+            "https://e.com/", safelist));
+
+        // the attribute is removed entirely when every candidate is an orphan
+        assertEquals("<img>", Jsoup.clean("<img srcset='1x, 2x, 100w'>", "https://e.com/", safelist));
+
+        // a descriptor-shaped token that includes any non-number characters (a slash, a letter) is an ordinary
+        // relative URL and survives, so e.g. versioned paths are not mistaken for orphans
+        assertEquals("<img srcset=\"assets/1x, 1e3x, http://ok.example/a.jpg\">",
+            Jsoup.clean("<img srcset='assets/1x, 1e3x, http://ok.example/a.jpg'>", "https://e.com/", safelist));
+    }
+
+    @Test void srcsetOrphanDescriptorsDroppedWithoutProtocols() {
+        // orphan detection is structural: it applies even when no protocols constrain the URLs
+        Safelist safelist = Safelist.basicWithImages().addAttributes("img", "srcset").preserveRelativeLinks(true);
+        assertEquals("<img srcset=\"custom:thing, assets/1x\">",
+            Jsoup.clean("<img srcset='1x, custom:thing, 0w, assets/1x'>", "https://e.com/", safelist));
+    }
+
+    @Test void srcsetMalformedBoundariesDoNotSplice() {
+        Safelist safelist = srcsetSafelist();
+        // consecutive / leading / trailing commas leave empty candidates that must not become dangling commas
+        assertEquals("<img srcset=\"http://ok.example/a.jpg 1x, http://ok.example/b.jpg 2x\">",
+            Jsoup.clean("<img srcset=',http://ok.example/a.jpg 1x,,, http://ok.example/b.jpg 2x,,'>", "https://e.com/", safelist));
+        // a bad middle candidate is dropped and the survivors are not joined
+        assertEquals("<img srcset=\"http://ok.example/a.jpg 1x, http://ok.example/c.jpg 3x\">",
+            Jsoup.clean("<img srcset='http://ok.example/a.jpg 1x, javascript:bad 2x, http://ok.example/c.jpg 3x'>",
+                "https://e.com/", safelist));
+    }
+
+    @Test void srcsetBrokenEntityFailsOnlyItsCandidate() {
+        Safelist safelist = srcsetSafelist();
+        // a control character revealed by an entity makes that candidate unsafe; the safe sibling is kept
+        String clean = Jsoup.clean(
+            "<img srcset='java&#x00;script:alert(1) 1x, http://ok.example/a.jpg 2x'>",
+            "https://e.com/page/", safelist);
+        assertEquals("<img srcset=\"http://ok.example/a.jpg 2x\">", clean);
+        // and a lone bad candidate still removes the whole attribute without throwing
+        assertEquals("<img>", Jsoup.clean("<img srcset='java&#x00;script:alert(1)'>", "https://e.com/page/", safelist));
+    }
+
+    @Test void srcsetMultipleElementsIndependentBaseUriAndFailure() {
+        Safelist safelist = srcsetSafelist();
+        Document dirty = Jsoup.parse(
+            "<img srcset='a.jpg 1x'>"
+                + "<img srcset='javascript:nope 1x'>"
+                + "<img srcset='b.jpg 2x'>",
+            "https://first.example/dir/page.html");
+        // give the third element its own, different base URI
+        dirty.select("img").get(2).setBaseUri("https://second.example/other/");
+
+        Cleaner cleaner = new Cleaner(safelist);
+        Document clean = cleaner.clean(dirty);
+        assertEquals(3, clean.select("img").size());
+        assertTrue(clean.select("img").get(0).hasAttr("srcset"));
+        assertFalse(clean.select("img").get(1).hasAttr("srcset")); // all candidates rejected, attr dropped
+        assertTrue(clean.select("img").get(2).hasAttr("srcset"));
+        assertEquals("https://second.example/other/", clean.select("img").get(2).baseUri());
+        // source document is untouched
+        assertEquals(3, dirty.select("img").eachAttr("srcset").size());
+    }
+
+    @Test void srcsetRejectedCandidatesNeverAppearInTraversal() {
+        Safelist safelist = srcsetSafelist();
+        Document dirty = Jsoup.parse(
+            "<img srcset='http://ok.example/a.jpg 1x, javascript:gone(1) 2x, http://ok.example/b.jpg 3x'>",
+            "https://e.com/page/");
+        Document clean = new Cleaner(safelist).clean(dirty);
+        String attr = clean.select("img").attr("srcset");
+        assertEquals("http://ok.example/a.jpg 1x, http://ok.example/b.jpg 3x", attr);
+        assertFalse(clean.html().contains("javascript"));
+        // re-cleaning the already-clean document is stable
+        assertEquals(clean.body().html(), new Cleaner(safelist).clean(clean).body().html());
+    }
+
     @Test void srcsetRemovedWhenNoCandidatesSurvive() {
         Safelist safelist = Safelist.basicWithImages()
             .addAttributes("img", "srcset")
