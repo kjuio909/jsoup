@@ -140,10 +140,11 @@ public class FormElement extends Element {
         // iterate the form control elements and accumulate their values
         for (Element el: elements()) {
             if (!el.tag().isFormSubmittable()) continue; // contents are form listable, superset of submitable
-            if (el.hasAttr("disabled")) continue; // skip disabled form inputs
+            String type = el.attr("type");
+            // the disabled attribute does not apply to an input in the hidden state; browsers still submit it
+            if (el.hasAttr("disabled") && !(el.nameIs("input") && "hidden".equalsIgnoreCase(type))) continue;
             String name = el.attr("name");
             if (name.length() == 0) continue;
-            String type = el.attr("type");
 
             if (type.equalsIgnoreCase("button") || type.equalsIgnoreCase("image")) continue; // browsers don't submit these
 
@@ -172,10 +173,11 @@ public class FormElement extends Element {
         boolean submitted = false;
 
         for (Element option : options) {
+            if (owningSelect(option) != select) continue; // an option belongs to its nearest enclosing <select>
             if (!optionEnabled(option)) continue;
             if (firstEnabled == null) firstEnabled = option;
             if (option.hasAttr("selected")) {
-                data.add(HttpConnection.KeyVal.create(name, option.val()));
+                data.add(HttpConnection.KeyVal.create(name, optionValue(option)));
                 submitted = true;
                 if (!multiple) return; // single-select submits the first selected enabled option, in final order
             }
@@ -183,18 +185,32 @@ public class FormElement extends Element {
 
         if (!submitted && !multiple && firstEnabled != null) {
             // single-select with no enabled selected option falls back to the first enabled option
-            data.add(HttpConnection.KeyVal.create(name, firstEnabled.val()));
+            data.add(HttpConnection.KeyVal.create(name, optionValue(firstEnabled)));
         }
         // multi-select with no enabled selections, or a single-select with no enabled options, submits nothing
     }
 
+    /**
+     * The value a browser submits for an {@code <option>}: its {@code value} attribute when present (including an
+     * empty one), otherwise its text content.
+     */
+    private String optionValue(Element option) {
+        return option.hasAttr("value") ? option.attr("value") : option.wholeText();
+    }
+
+    private @Nullable Element owningSelect(Element option) {
+        for (Element ancestor = option.parentElement(); ancestor != null; ancestor = ancestor.parentElement()) {
+            if (ancestor.nameIs("select")) return ancestor;
+        }
+        return null;
+    }
+
     private boolean optionEnabled(Element option) {
         if (option.hasAttr("disabled")) return false;
-        // an option is also unavailable when its nearest enclosing <optgroup> is disabled
-        for (Element ancestor = option.parentElement();
-             ancestor != null && ancestor.nameIs("optgroup");
+        // an option is also unavailable when any enclosing <optgroup> ancestor (up to the <select>) is disabled
+        for (Element ancestor = option.parentElement(); ancestor != null && !ancestor.nameIs("select");
              ancestor = ancestor.parentElement()) {
-            if (ancestor.hasAttr("disabled")) return false;
+            if (ancestor.nameIs("optgroup") && ancestor.hasAttr("disabled")) return false;
         }
         return true;
     }

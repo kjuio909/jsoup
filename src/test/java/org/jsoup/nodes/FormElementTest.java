@@ -337,6 +337,41 @@ public class FormElementTest {
         assertEquals("s=a", dataString(Jsoup.parse(html).expectForm("#f")));
     }
 
+    @Test void hiddenInputIsSubmittedEvenWhenDisabled() {
+        // per the HTML spec, the disabled attribute does not apply to an input in the hidden state
+        String html = "<form id=f>" +
+            "<input type=hidden name=h value=H disabled>" +
+            "<input type=text name=t value=T disabled>" +
+            "</form>";
+        assertEquals("h=H", dataString(Jsoup.parse(html).expectForm("#f")));
+    }
+
+    @Test void optionWithoutValueAttributeSubmitsItsText() {
+        String html = "<form id=f>" +
+            "<select name=s><option selected>hello</option><option>world</option></select>" +
+            "<select name=s2><option value=''>explicit-empty</option><option>fallback-text</option></select>" +
+            "</form>";
+        assertEquals("s=hello&s2=", dataString(Jsoup.parse(html).expectForm("#f")));
+    }
+
+    @Test void singleSelectFallbackOptionWithoutValueSubmitsItsText() {
+        String html = "<form id=f><select name=s><option disabled selected>none</option>" +
+            "<option>first enabled</option></select></form>";
+        assertEquals("s=first enabled", dataString(Jsoup.parse(html).expectForm("#f")));
+    }
+
+    @Test void nestedSelectOptionsBelongToNearestSelectAfterEdit() {
+        Document doc = Jsoup.parse("<form id=f><select name=s>" +
+            "<option value=a selected><option value=b></select></form>");
+        FormElement form = doc.expectForm("#f");
+        assertEquals("s=a", dataString(form));
+
+        Element inner = new Element("select").attr("name", "i");
+        inner.appendElement("option").attr("value", "x").attr("selected", "selected");
+        doc.selectFirst("select").appendChild(inner);
+        assertEquals("s=a&i=x", dataString(form)); // the outer select must not swallow the nested option
+    }
+
     @Test void checkboxesAndRadiosOnlySubmitWhenChecked() {
         String html = "<form id=f>" +
             "<input type=checkbox name=cb checked>" +        // default on
