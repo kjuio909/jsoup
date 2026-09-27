@@ -48,16 +48,144 @@ public class FormElementTest {
         FormElement form = (FormElement) doc.select("form").first();
         List<Connection.KeyVal> data = form.formData();
 
-        assertEquals(6, data.size());
+        assertEquals(5, data.size());
         assertEquals("one=two", data.get(0).toString());
-        assertEquals("three=four", data.get(1).toString());
-        assertEquals("three=five", data.get(2).toString());
-        assertEquals("six=seven", data.get(3).toString());
-        assertEquals("seven=on", data.get(4).toString()); // set
-        assertEquals("eight=on", data.get(5).toString()); // default
+        assertEquals("three=four", data.get(1).toString()); // single select submits only the first enabled selected option
+        assertEquals("six=seven", data.get(2).toString());
+        assertEquals("seven=on", data.get(3).toString()); // set
+        assertEquals("eight=on", data.get(4).toString()); // default
         // nine should not appear, not checked checkbox
         // ten should not appear, disabled
         // eleven should not appear, button
+    }
+
+    @Test public void multiSelectSubmitsAllEnabledSelectedOptions() {
+        String html = "<form><select name=multi multiple>" +
+                "<option value=one selected><option value=two><option value=three selected>" +
+                "<option value=four selected disabled><option value=five selected></select>" +
+                "<select name=none multiple><option value=one><option value=two disabled selected></select></form>";
+        Document doc = Jsoup.parse(html);
+        FormElement form = (FormElement) doc.selectFirst("form");
+        List<Connection.KeyVal> data = form.formData();
+
+        assertEquals(3, data.size());
+        assertEquals("multi=one", data.get(0).toString());
+        assertEquals("multi=three", data.get(1).toString());
+        assertEquals("multi=five", data.get(2).toString());
+        // four is disabled; none has no enabled selected option so produces no entry
+    }
+
+    @Test public void singleSelectFallsBackToFirstEnabledOption() {
+        String html = "<form>" +
+                "<select name=fallback><option value=one><option value=two></select>" +
+                "<select name=disabledSel><option value=one selected disabled><option value=two selected><option value=three></select>" +
+                "<select name=allDisabled><option value=one disabled><option value=two disabled></select>" +
+                "<select name=inGroup><optgroup disabled><option value=one selected></optgroup><option value=two></select>" +
+                "</form>";
+        Document doc = Jsoup.parse(html);
+        FormElement form = (FormElement) doc.selectFirst("form");
+        List<Connection.KeyVal> data = form.formData();
+
+        assertEquals(3, data.size());
+        assertEquals("fallback=one", data.get(0).toString()); // no selected, first enabled
+        assertEquals("disabledSel=two", data.get(1).toString()); // first enabled selected
+        assertEquals("inGroup=two", data.get(2).toString()); // selected option under a disabled optgroup is skipped
+        // allDisabled produces no entry
+    }
+
+    @Test public void disabledFieldsetExcludesControlsExceptInFirstLegend() {
+        String html = "<form><fieldset disabled>" +
+                "<legend><input name=legend value=one></legend>" +
+                "<input name=inner value=two>" +
+                "<legend><input name=secondLegend value=three></legend>" +
+                "</fieldset>" +
+                "<input name=outer value=four></form>";
+        Document doc = Jsoup.parse(html);
+        FormElement form = (FormElement) doc.selectFirst("form");
+        List<Connection.KeyVal> data = form.formData();
+
+        assertEquals(2, data.size());
+        assertEquals("legend=one", data.get(0).toString()); // first legend subtree is exempt
+        assertEquals("outer=four", data.get(1).toString());
+        // inner is under a disabled fieldset; secondLegend is not the first legend
+    }
+
+    @Test public void nestedDisabledFieldsets() {
+        String html = "<form><fieldset disabled><legend><fieldset disabled><legend><input name=deep value=one></legend>" +
+                "<input name=inner value=two></fieldset></legend></fieldset>" +
+                "<fieldset><fieldset disabled><input name=nested value=three></fieldset></fieldset></form>";
+        Document doc = Jsoup.parse(html);
+        FormElement form = (FormElement) doc.selectFirst("form");
+        List<Connection.KeyVal> data = form.formData();
+
+        assertEquals(1, data.size());
+        assertEquals("deep=one", data.get(0).toString()); // in the first legend of both fieldsets
+        // inner is excluded by the outer fieldset; nested by the inner
+    }
+
+    @Test public void formAttributeAssociatesExternalControls() {
+        String html = "<input name=before value=1 form=f1>" +
+                "<form id=f1><input name=inner value=2></form>" +
+                "<input name=after value=3 form=f1>" +
+                "<input name=other value=4 form=f2>" +
+                "<input name=invalid value=5 form=nope>" +
+                "<input name=noform value=6>";
+        Document doc = Jsoup.parse(html);
+        FormElement form = doc.expectForm("#f1");
+        List<Connection.KeyVal> data = form.formData();
+
+        assertEquals(3, data.size());
+        assertEquals("before=1", data.get(0).toString());
+        assertEquals("inner=2", data.get(1).toString());
+        assertEquals("after=3", data.get(2).toString());
+        // other points to a different form, invalid to a missing form, noform has no association
+    }
+
+    @Test public void formAttributeOverridesAncestry() {
+        String html = "<form id=f1><input name=moved value=1 form=f2><input name=kept value=2></form>" +
+                "<form id=f2></form>";
+        Document doc = Jsoup.parse(html);
+
+        List<Connection.KeyVal> data1 = doc.expectForm("#f1").formData();
+        assertEquals(1, data1.size());
+        assertEquals("kept=2", data1.get(0).toString());
+
+        List<Connection.KeyVal> data2 = doc.expectForm("#f2").formData();
+        assertEquals(1, data2.size());
+        assertEquals("moved=1", data2.get(0).toString());
+    }
+
+    @Test public void formDataReflectsReassociationAndRemoval() {
+        String html = "<form id=f1><input name=a value=1><input name=b value=2></form><form id=f2></form>";
+        Document doc = Jsoup.parse(html);
+        FormElement f1 = doc.expectForm("#f1");
+        FormElement f2 = doc.expectForm("#f2");
+
+        List<Connection.KeyVal> first = f1.formData();
+        assertEquals(2, first.size());
+        first.clear(); // mutating the result must not impact subsequent reads
+        assertEquals(2, f1.formData().size());
+
+        // reassign b to f2 via the form attribute, and remove a
+        doc.selectFirst("input[name=b]").attr("form", "f2");
+        doc.selectFirst("input[name=a]").remove();
+
+        List<Connection.KeyVal> data1 = f1.formData();
+        assertEquals(0, data1.size());
+        List<Connection.KeyVal> data2 = f2.formData();
+        assertEquals(1, data2.size());
+        assertEquals("b=2", data2.get(0).toString());
+    }
+
+    @Test public void formDataIsEmptyForEmptyFormAndDoesNotMutate() {
+        String html = "<form id=f></form><p>after</p>";
+        Document doc = Jsoup.parse(html);
+        FormElement form = doc.expectForm("#f");
+        String before = doc.html();
+
+        List<Connection.KeyVal> data = form.formData();
+        assertTrue(data.isEmpty());
+        assertEquals(before, doc.html()); // extraction leaves the document untouched
     }
 
     @Test public void formDataUsesFirstAttribute() {
