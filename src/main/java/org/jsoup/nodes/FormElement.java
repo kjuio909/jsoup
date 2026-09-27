@@ -181,21 +181,61 @@ public class FormElement extends Element {
      (controls in the fieldset's first {@code <legend>} subtree are exempt). For {@code <select>}, disabled options and
      options in a disabled {@code <optgroup>} are skipped; a non-multiple select with no selected option contributes its
      first available option. Checkboxes and radios are only included when checked, defaulting to the value
-     {@code on}; {@code <input type=button>} and {@code type=image>} are never included.</p>
+     {@code on}; {@code <input type=button>} and {@code type=reset>} are never included.</p>
+     <p>As no submitter is given, submit buttons &mdash; {@code <input type=submit>}, {@code <input type=image>}, and
+     a {@code <button>} whose {@code type} is {@code submit} (the default) &mdash; are not treated as ordinary fields
+     and contribute nothing. Activate the form through one of them with {@link #formData(Element)} to include that
+     submitter.</p>
      @return a list of key vals, in the order the controls appear in the document; empty if none apply
+     @see #formData(Element)
      */
     public List<Connection.KeyVal> formData() {
+        return formData(null);
+    }
+
+    /**
+     Get the data that this form submits when activated through {@code submitter}. Behaves like {@link #formData()},
+     but additionally includes the one activated submit button, in its document-order position among the other
+     controls; every other submit button remains excluded.
+     <p>The submitter may be an {@code <input type=submit>}, an {@code <input type=image>}, or a {@code <button>}
+     whose {@code type} is {@code submit} (the default). Per the browser convention, an image control contributes its
+     click coordinates, {@code x=0} and {@code y=0} (or {@code <name>.x=0} and {@code <name>.y=0} when named); an
+     unnamed submit input or button contributes nothing. The submitter must be enabled and associated with this
+     form.</p>
+     @param submitter the button used to activate the form, or {@code null} to collect without a submitter
+     @return a list of key vals, in the order the controls appear in the document; empty if none apply
+     @throws IllegalArgumentException if the submitter is not an enabled submit button associated with this form
+     */
+    public List<Connection.KeyVal> formData(@Nullable Element submitter) {
+        Elements controls = elements();
+        if (submitter != null) {
+            String submitterType = submitter.attr("type");
+            if (!isSubmitControl(submitter, submitterType) || submitter.hasAttr("disabled")
+                || isInDisabledFieldset(submitter) || !controls.contains(submitter)) {
+                throw new IllegalArgumentException(
+                    "Submitter must be an enabled submit button associated with this form.");
+            }
+        }
+
         ArrayList<Connection.KeyVal> data = new ArrayList<>();
 
         // iterate the associated form controls and accumulate their values
-        for (Element el : elements()) {
-            if (!el.tag().isFormSubmittable()) continue; // listed elements are a superset of submittable ones
+        for (Element el : controls) {
+            String type = el.attr("type");
+            boolean submitControl = isSubmitControl(el, type);
+            if (!submitControl && !el.tag().isFormSubmittable()) continue; // <button> is listed but not flagged submittable
             if (el.hasAttr("disabled")) continue; // skip disabled form inputs
             String name = el.attr("name");
-            if (name.length() == 0) continue;
-            String type = el.attr("type");
 
-            if (type.equalsIgnoreCase("button") || type.equalsIgnoreCase("image")) continue; // browsers don't submit these
+            if (submitControl) {
+                // a submit button is only successful when it is the explicit submitter
+                if (el == submitter)
+                    addSubmitterData(el, name, type, data);
+                continue;
+            }
+
+            if (name.length() == 0) continue;
+            if (type.equalsIgnoreCase("button") || type.equalsIgnoreCase("reset")) continue; // never submitted
 
             if (isInDisabledFieldset(el)) continue; // first legend subtree of a disabled fieldset is exempt
 
@@ -208,11 +248,35 @@ public class FormElement extends Element {
                     data.add(HttpConnection.KeyVal.create(name, val));
                 }
             } else {
-                // textarea#val() returns its text; other controls use their value attribute (incl. input type=submit)
+                // textarea#val() returns its text; other controls use their value attribute
                 data.add(HttpConnection.KeyVal.create(name, el.val()));
             }
         }
         return data;
+    }
+
+    /**
+     A control that is successful only when it activated the form: an {@code <input type=submit>},
+     {@code <input type=image>}, or a {@code <button>} that is not {@code type=button} or {@code type=reset}
+     (a button without a {@code type} defaults to {@code submit}).
+     */
+    private static boolean isSubmitControl(Element el, String type) {
+        if (el.nameIs("button"))
+            return !"button".equalsIgnoreCase(type) && !"reset".equalsIgnoreCase(type);
+        return el.nameIs("input")
+            && ("submit".equalsIgnoreCase(type) || "image".equalsIgnoreCase(type));
+    }
+
+    /** Append the value an activated submit button contributes (nothing for an unnamed submit/button). */
+    private static void addSubmitterData(Element el, String name, String type, ArrayList<Connection.KeyVal> data) {
+        if ("image".equalsIgnoreCase(type)) {
+            // image buttons submit the clicked coordinates, with the name prefixed when present
+            String prefix = name.length() == 0 ? "" : name + ".";
+            data.add(HttpConnection.KeyVal.create(prefix + "x", "0"));
+            data.add(HttpConnection.KeyVal.create(prefix + "y", "0"));
+        } else if (name.length() > 0) {
+            data.add(HttpConnection.KeyVal.create(name, el.val()));
+        }
     }
 
     private static void addSelectData(Element select, String name, ArrayList<Connection.KeyVal> data) {

@@ -160,10 +160,16 @@ public class FormElementTest {
         Document doc = Jsoup.parse(html);
         FormElement form = (FormElement) doc.select("form").first();
         List<Connection.KeyVal> data = form.formData();
-        assertEquals(3, data.size());
+        assertEquals(2, data.size()); // submit button excluded without an explicit submitter
         assertEquals("user", data.get(0).key());
         assertEquals("pass", data.get(1).key());
-        assertEquals("login", data.get(2).key());
+
+        Element login = doc.selectFirst("input[name=login]");
+        List<Connection.KeyVal> submitted = form.formData(login);
+        assertEquals(3, submitted.size());
+        assertEquals("user", submitted.get(0).key());
+        assertEquals("pass", submitted.get(1).key());
+        assertEquals("login=login", submitted.get(2).toString());
     }
 
     @Test public void removeFormElement() {
@@ -182,9 +188,8 @@ public class FormElementTest {
         pass.remove();
 
         List<Connection.KeyVal> data = form.formData();
-        assertEquals(2, data.size());
+        assertEquals(1, data.size());
         assertEquals("user", data.get(0).key());
-        assertEquals("login", data.get(1).key());
         assertNull(doc.selectFirst("input[name=pass]"));
     }
 
@@ -416,10 +421,115 @@ public class FormElementTest {
         assertEquals("4", data.get(3).value()); // form-attr control outside the subtree, in document order
     }
 
-    @Test void submitButtonIsIncluded() {
+    @Test void submitButtonExcludedWithoutSubmitter() {
         String html = "<form><input type='submit' name='go' value='Submit'></form>";
         Document doc = Jsoup.parse(html);
-        assertEquals("go=Submit", doc.expectForm("form").formData().get(0).toString());
+        assertEquals(0, doc.expectForm("form").formData().size());
+    }
+
+    @Test void formDataWithSubmitInputIncludesOnlyThatSubmitter() {
+        String html = "<form><input name='q' value='x'>" +
+            "<input id='b1' type='submit' name='go1' value='One'>" +
+            "<input id='b2' type='submit' name='go2' value='Two'>" +
+            "<button name='go3' value='Three'>Three</button></form>";
+        Document doc = Jsoup.parse(html);
+        FormElement form = doc.expectForm("form");
+
+        List<Connection.KeyVal> data = form.formData(doc.getElementById("b1"));
+        assertEquals(2, data.size());
+        assertEquals("q=x", data.get(0).toString());
+        assertEquals("go1=One", data.get(1).toString()); // document-order position; other buttons absent
+    }
+
+    @Test void formDataWithButtonElementAsSubmitter() {
+        String html = "<form><input name='q' value='x'><button id='b' name='go' value='Three'>Label</button></form>";
+        Document doc = Jsoup.parse(html);
+        List<Connection.KeyVal> data = doc.expectForm("form").formData(doc.getElementById("b"));
+        assertEquals(2, data.size());
+        assertEquals("q=x", data.get(0).toString());
+        assertEquals("go=Three", data.get(1).toString()); // value attr, not label
+    }
+
+    @Test void formDataWithImageSubmitterAddsCoordinates() {
+        String html = "<form><input name='q' value='x'><input id='img' type='image' name='go' src='go.png'></form>";
+        Document doc = Jsoup.parse(html);
+        List<Connection.KeyVal> data = doc.expectForm("form").formData(doc.getElementById("img"));
+        assertEquals(3, data.size());
+        assertEquals("q=x", data.get(0).toString());
+        assertEquals("go.x=0", data.get(1).toString());
+        assertEquals("go.y=0", data.get(2).toString());
+    }
+
+    @Test void formDataWithUnnamedImageSubmitterAddsBareCoordinates() {
+        String html = "<form><input id='img' type='image' src='go.png'></form>";
+        Document doc = Jsoup.parse(html);
+        List<Connection.KeyVal> data = doc.expectForm("form").formData(doc.getElementById("img"));
+        assertEquals(2, data.size());
+        assertEquals("x=0", data.get(0).toString());
+        assertEquals("y=0", data.get(1).toString());
+    }
+
+    @Test void formDataSubmitterRejectsNonSubmitControls() {
+        String html = "<form><input id='t' name='q' value='x'><input id='r' type='reset' name='r' value='r'>" +
+            "<button id='bb' type='button' name='bb'>x</button></form>";
+        Document doc = Jsoup.parse(html);
+        FormElement form = doc.expectForm("form");
+        assertThrows(IllegalArgumentException.class, () -> form.formData(doc.getElementById("t")));
+        assertThrows(IllegalArgumentException.class, () -> form.formData(doc.getElementById("r")));
+        assertThrows(IllegalArgumentException.class, () -> form.formData(doc.getElementById("bb")));
+    }
+
+    @Test void formDataSubmitterRejectsDisabledOrForeignControl() {
+        String html = "<form id='f'><input id='s1' type='submit' name='a' value='1' disabled>" +
+            "<input id='s2' type='submit' name='b' value='2'></form>" +
+            "<form id='g'><input id='s3' type='submit' name='c' value='3'></form>";
+        Document doc = Jsoup.parse(html);
+        FormElement f = doc.expectForm("#f");
+        assertThrows(IllegalArgumentException.class, () -> f.formData(doc.getElementById("s1")));
+        assertThrows(IllegalArgumentException.class, () -> f.formData(doc.getElementById("s3")));
+    }
+
+    @Test void resetAndButtonInputsAreNeverSuccessful() {
+        String html = "<form><input name='a' value='1' type='reset'><input name='b' value='2' type='button'>" +
+            "<input name='c' value='3'></form>";
+        Document doc = Jsoup.parse(html);
+        List<Connection.KeyVal> data = doc.expectForm("form").formData();
+        assertEquals(1, data.size());
+        assertEquals("c=3", data.get(0).toString());
+    }
+
+    @Test void formDataReflectsMutationsAndDoesNotMutate() {
+        String html = "<form><input id='a' name='a' value='1'><input id='b' name='b' type='checkbox' checked>" +
+            "<input id='s' type='submit' name='go' value='go'></form>";
+        Document doc = Jsoup.parse(html);
+        FormElement form = doc.expectForm("form");
+
+        List<Connection.KeyVal> first = form.formData();
+        assertEquals(2, first.size());
+        assertEquals("a=1", first.get(0).toString());
+        assertEquals("b=on", first.get(1).toString());
+
+        doc.getElementById("b").removeAttr("checked");
+        doc.getElementById("a").attr("value", "2");
+        List<Connection.KeyVal> second = form.formData();
+        assertEquals(1, second.size());
+        assertEquals("a=2", second.get(0).toString());
+        assertEquals(2, first.size()); // earlier result untouched
+
+        // enabling the submitter path after the fact
+        List<Connection.KeyVal> submitted = form.formData(doc.getElementById("s"));
+        assertEquals(2, submitted.size());
+        assertEquals("a=2", submitted.get(0).toString());
+        assertEquals("go=go", submitted.get(1).toString());
+        assertTrue(doc.getElementById("s").hasAttr("name")); // DOM unchanged by collection
+    }
+
+    @Test void unnamedSubmitButtonContributesNothingEvenAsSubmitter() {
+        String html = "<form><input name='q' value='x'><input id='s' type='submit' value='go'></form>";
+        Document doc = Jsoup.parse(html);
+        List<Connection.KeyVal> data = doc.expectForm("form").formData(doc.getElementById("s"));
+        assertEquals(1, data.size());
+        assertEquals("q=x", data.get(0).toString());
     }
 
     @Test void fosteredControlKeepsAssociationUntilMoved() {
