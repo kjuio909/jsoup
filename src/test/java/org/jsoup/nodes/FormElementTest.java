@@ -337,6 +337,18 @@ public class FormElementTest {
         assertEquals("s=a", dataString(Jsoup.parse(html).expectForm("#f")));
     }
 
+    @Test void optionWithoutValueSubmitsItsText() {
+        // per the HTML spec, an option with no value attribute contributes its text content
+        String html = "<form id=f><select name=s>" +
+            "<option>foo</option>" +
+            "<option selected>bar</option>" +
+            "<option value=''>baz</option>" +
+            "</select>" +
+            "<select name=m multiple><option selected>one</option><option selected value=two></select>" +
+            "<select name=f2><option>fall</option></select></form>";
+        assertEquals("s=bar&m=one&m=two&f2=fall", dataString(Jsoup.parse(html).expectForm("#f")));
+    }
+
     @Test void checkboxesAndRadiosOnlySubmitWhenChecked() {
         String html = "<form id=f>" +
             "<input type=checkbox name=cb checked>" +        // default on
@@ -390,6 +402,32 @@ public class FormElementTest {
         a.attr("form", "h");
         assertEquals("", dataString(form));
         assertEquals("a=A", dataString(h));
+    }
+
+    @Test void formDataReflectsDisabledTogglingAfterRead() {
+        String html = "<form id=f>" +
+            "<input id=ctrl name=a value=A>" +
+            "<fieldset id=fs disabled><legend><input name=leg value=L></legend><input name=b value=B></fieldset>" +
+            "<select id=sel name=s><option id=o1 value=x selected><option id=o2 value=y></select>" +
+            "</form>";
+        Document doc = Jsoup.parse(html);
+        FormElement form = doc.expectForm("#f");
+        assertEquals("a=A&leg=L&s=x", dataString(form));
+
+        doc.selectFirst("#ctrl").attr("disabled", "");       // disable a control after reading
+        assertEquals("leg=L&s=x", dataString(form));
+        doc.selectFirst("#ctrl").removeAttr("disabled");     // re-enable
+        assertEquals("a=A&leg=L&s=x", dataString(form));
+
+        doc.selectFirst("#fs").removeAttr("disabled");       // fieldset unblocks b
+        assertEquals("a=A&leg=L&b=B&s=x", dataString(form));
+        doc.selectFirst("#fs").attr("disabled", "");         // re-block, legend exception still applies
+        assertEquals("a=A&leg=L&s=x", dataString(form));
+
+        doc.selectFirst("#o1").attr("disabled", "");         // selected option disabled -> first enabled fallback
+        assertEquals("a=A&leg=L&s=y", dataString(form));
+        doc.selectFirst("#sel").attr("disabled", "");        // whole select disabled
+        assertEquals("a=A&leg=L", dataString(form));
     }
 
     @Test void returnedFormDataIsIndependentAcrossCalls() {

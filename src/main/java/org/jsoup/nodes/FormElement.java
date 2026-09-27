@@ -201,7 +201,7 @@ public class FormElement extends Element {
             if (!optionEnabled(option)) continue;
             if (firstEnabled == null) firstEnabled = option;
             if (option.hasAttr("selected")) {
-                data.add(HttpConnection.KeyVal.create(name, option.val()));
+                data.add(HttpConnection.KeyVal.create(name, optionValue(option)));
                 submitted = true;
                 if (!multiple) return; // single-select submits the first selected enabled option, in final order
             }
@@ -209,7 +209,7 @@ public class FormElement extends Element {
 
         if (!submitted && !multiple && firstEnabled != null) {
             // single-select with no enabled selected option falls back to the first enabled option
-            data.add(HttpConnection.KeyVal.create(name, firstEnabled.val()));
+            data.add(HttpConnection.KeyVal.create(name, optionValue(firstEnabled)));
         }
         // multi-select with no enabled selections, or a single-select with no enabled options, submits nothing
     }
@@ -223,6 +223,14 @@ public class FormElement extends Element {
             if (ancestor.hasAttr("disabled")) return false;
         }
         return true;
+    }
+
+    /**
+     * Per the HTML spec, an {@code <option>} submits its {@code value} attribute, or, when that is absent, its text
+     * content.
+     */
+    private static String optionValue(Element option) {
+        return option.hasAttr("value") ? option.attr("value") : option.text();
     }
 
     /**
