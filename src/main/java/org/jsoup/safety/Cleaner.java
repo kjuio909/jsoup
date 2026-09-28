@@ -16,7 +16,9 @@ import org.jsoup.select.NodeVisitor;
 
 import java.net.MalformedURLException;
 import java.net.URL;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 
 import static org.jsoup.internal.SharedConstants.DummyUri;
 
@@ -167,6 +169,10 @@ public class Cleaner {
         private int numDiscarded = 0;
         private final Element root;
         private Element destination; // current element to append nodes to
+        // style elements whose stylesheet data nodes were all rejected are removed at their tail; an element with at
+        // least one surviving data node is kept, mirroring an attribute whose value still has safe declarations
+        private final Set<Element> rejectedStyleElements = new HashSet<>();
+        private final Set<Element> keptStyleElements = new HashSet<>();
 
         private CleaningVisitor(Element root, Element destination) {
             this.root = root;
@@ -193,8 +199,21 @@ public class Cleaner {
                 destination.appendChild(destText);
             } else if (source instanceof DataNode && safelist.isSafeTag(source.parent().normalName())) {
                 DataNode sourceData = (DataNode) source;
-                DataNode destData = new DataNode(sourceData.getWholeData());
-                destination.appendChild(destData);
+                String data = sourceData.getWholeData();
+                Node parent = source.parent();
+                if (parent.normalName().equals("style")) { // an allowed <style> element: clean its stylesheet text
+                    String cleaned = safelist.cleanStyleSheet(parent.normalName(), (Element) parent, data);
+                    if (cleaned == null) { // this data node's rules were all invalid
+                        numDiscarded++;
+                        rejectedStyleElements.add(destination);
+                    } else {
+                        if (!cleaned.equals(data)) numDiscarded++; // rules or declarations were dropped/normalized
+                        keptStyleElements.add(destination);
+                        destination.appendChild(new DataNode(cleaned));
+                    }
+                } else {
+                    destination.appendChild(new DataNode(data));
+                }
             } else { // else, we don't care about comments, xml proc instructions, etc
                 numDiscarded++;
             }
@@ -202,7 +221,11 @@ public class Cleaner {
 
         @Override public void tail(Node source, int depth) {
             if (source instanceof Element && safelist.isSafeTag(source.normalName())) {
+                Element self = destination;
                 destination = destination.parent(); // would have descended, so pop destination stack
+                boolean rejected = rejectedStyleElements.remove(self);
+                boolean kept = keptStyleElements.remove(self);
+                if (rejected && !kept) self.remove(); // remove a <style> element whose content was wholly invalid
             }
         }
     }

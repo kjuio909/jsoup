@@ -39,6 +39,14 @@ final class StyleCleaner {
     }
 
     /**
+     Creates a cleaner bound to the given element. The {@code style} attribute cleaner and the {@code <style>}
+     element stylesheet cleaner ({@link StyleSheetCleaner}) share the same lexical primitives and URL policy.
+     */
+    static StyleCleaner create(Safelist safelist, String tagName, Element el) {
+        return new StyleCleaner(safelist, tagName, el);
+    }
+
+    /**
      Cleans an inline {@code style} attribute value declaration by declaration, preserving the order and original
      text of every declaration that survives.
      @return the cleaned value, or {@code null} when no declaration survives (in which case the attribute is removed)
@@ -125,7 +133,7 @@ final class StyleCleaner {
      * unmatched parenthesis maps to {@code -1}; a single linear pass keeps style cleaning O(n) even when a value
      * contains many semicolons nested in functions.
      */
-    private int[] parenMatches(String value) {
+    int[] parenMatches(String value) {
         int length = value.length();
         int[] match = new int[length];
         Arrays.fill(match, -1);
@@ -178,7 +186,7 @@ final class StyleCleaner {
      *       or after the opening quote (the malformed declaration is cut there), or the value length when none.</li>
      * </ul>
      */
-    private int[] scanQuoted(String value, int from, char quote) {
+    int[] scanQuoted(String value, int from, char quote) {
         int length = value.length();
         int firstSemi = -1;
         for (int i = from; i < length; i++) {
@@ -196,18 +204,29 @@ final class StyleCleaner {
      @param structurallyBad the containing walk already found a malformed construct (a bad-string token)
      */
     private void appendSafeDeclaration(String value, int start, int end, boolean structurallyBad, StringBuilder out) {
-        if (structurallyBad) return;
+        int to = safeDeclarationRange(value, start, end, structurallyBad);
+        if (to > start) append(out, value, start, to);
+    }
+
+    /**
+     Validates the declaration at {@code [start, end)} the same way an inline {@code style} attribute declaration
+     is validated, and returns the end index (up to {@code end}, with trailing whitespace trimmed) of the verbatim
+     source span that survives, or {@code start} when the whole declaration must be dropped. The stylesheet cleaner
+     reuses this for every declaration inside a rule body, while emitting the surrounding rule text itself.
+     @param structurallyBad the containing walk already found a malformed construct (a bad-string token)
+     */
+    int safeDeclarationRange(String value, int start, int end, boolean structurallyBad) {
+        if (structurallyBad) return start;
         int p = skipSpaceAndComments(value, start, end);
-        if (p < 0) return; // an unterminated leading comment rejects only this declaration
+        if (p < 0) return start; // an unterminated leading comment rejects only this declaration
         int q = end;
         while (q > p && isCssSpace(value.charAt(q - 1))) q--;
-        if (p == q) return; // whitespace-only fragment, e.g. from a duplicated ';'
+        if (p == q) return start; // whitespace-only fragment, e.g. from a duplicated ';'
         int nameStart = p;
 
         // an at-rule in a declaration position: only @import is meaningful inline, and its reference must pass
         if (value.charAt(p) == '@') {
-            if (isSafeImportDeclaration(value, p, q)) append(out, value, start, q);
-            return;
+            return isSafeImportDeclaration(value, p, q) ? q : start;
         }
         // property: a plain CSS identifier (including a vendor prefix such as -webkit-*) or a custom property
         // (--name). Escapes, comments, and quotes are not accepted in a declaration name.
@@ -216,30 +235,30 @@ final class StyleCleaner {
             if (p + 1 < end && value.charAt(p + 1) == '-') {
                 p += 2;
                 custom = true;
-                if (p >= q || !isIdentChar(value.charAt(p))) return; // "--" alone is not a property name
+                if (p >= q || !isIdentChar(value.charAt(p))) return start; // "--" alone is not a property name
                 while (p < q && isIdentChar(value.charAt(p))) p++;
             } else {
-                if (p + 1 >= q || !isIdentStart(value.charAt(p + 1))) return; // a bare '-' is not a property name
+                if (p + 1 >= q || !isIdentStart(value.charAt(p + 1))) return start; // a bare '-' is not a property name
                 p++; // let the ordinary identifier run consume the vendor-prefixed remainder
             }
         }
         if (!custom) {
-            if (p >= q || !isIdentStart(value.charAt(p))) return; // no property name
+            if (p >= q || !isIdentStart(value.charAt(p))) return start; // no property name
             do { p++; } while (p < q && isIdentChar(value.charAt(p)));
         }
         int afterName = skipSpaceAndComments(value, p, q); // whitespace/comments may sit between the name and the ':'
-        if (afterName < 0) return; // an unterminated or unsafe comment in the gap rejects only this declaration
-        if (afterName >= q || value.charAt(afterName) != ':') return; // no ':' (empty fragment, junk, duplicate ';')
+        if (afterName < 0) return start; // an unterminated or unsafe comment in the gap rejects only this declaration
+        if (afterName >= q || value.charAt(afterName) != ':') return start; // no ':' (empty fragment, junk, duplicate ';')
         p = afterName + 1; // step past ':'
 
-        if (isDangerousProperty(value, nameStart)) return; // known script-entry properties, regardless of value
+        if (isDangerousProperty(value, nameStart)) return start; // known script-entry properties, regardless of value
         // a custom property (--name) holds arbitrary free text: its value is scanned as one string, so a colon that is
         // not part of a reference (e.g. "--x: https://example.com" or a time such as "12:00"), a stray quote, or an
         // at-keyword other than @import is preserved verbatim; only its references decide its fate
         boolean safe = custom
             ? freeTextIsSafe(value.substring(p, q))
             : referencesAreSafe(value, p, q);
-        if (safe) append(out, value, start, q);
+        return safe ? q : start;
     }
 
     /** Appends a surviving declaration, separated from any earlier ones by a single semicolon. */
@@ -249,11 +268,11 @@ final class StyleCleaner {
     }
 
     /**
-     Validates an entire {@code @import} declaration: its leading reference (a quoted URL or a {@code url(...)}) must
+     Validates an entire {@code @import} statement: its leading reference (a quoted URL or a {@code url(...)}) must
      * pass the URL rules, and any trailing layer/media/supports conditions must themselves contain no unsafe
      * reference.
      */
-    private boolean isSafeImportDeclaration(String value, int at, int end) {
+    boolean isSafeImportDeclaration(String value, int at, int end) {
         int i = at + 1;
         StringBuilder atName = new StringBuilder();
         i = scanIdent(value, i, end, atName);
@@ -287,7 +306,7 @@ final class StyleCleaner {
      it before tokenization), so its text is never inspected for a concealed reference; an unterminated comment is
      still an unbounded fragment and yields {@code -1}, rejecting only the declaration that contains it.
      */
-    private int skipSpaceAndComments(String value, int i, int end) {
+    int skipSpaceAndComments(String value, int i, int end) {
         while (i < end) {
             char c = value.charAt(i);
             if (isCssSpace(c)) { i++; continue; }
@@ -303,7 +322,7 @@ final class StyleCleaner {
     }
 
     /** Whitespace and comments may separate a function name from its opening parenthesis ({@code url /**\/ ( ... )}). */
-    private int skipSeparators(String value, int i, int end) {
+    int skipSeparators(String value, int i, int end) {
         return skipSpaceAndComments(value, i, end);
     }
 
@@ -365,7 +384,7 @@ final class StyleCleaner {
      spelling. Unbalanced parentheses, an unterminated string or comment, or any failed reference check rejects the
      declaration.
      */
-    private boolean referencesAreSafe(String value, int start, int end) {
+    boolean referencesAreSafe(String value, int start, int end) {
         int parenDepth = 0;
         int i = start;
         while (i < end) {
@@ -443,7 +462,7 @@ final class StyleCleaner {
      form is what a function name is compared against, so a hex-escaped, character-escaped, doubled-backslash, or
      differently cased {@code url} or {@code expression} cannot hide from the reference checks.
      */
-    private int scanIdent(String value, int from, int end, StringBuilder decoded) {
+    int scanIdent(String value, int from, int end, StringBuilder decoded) {
         int i = from;
         while (i < end) {
             char c = value.charAt(i);
@@ -588,7 +607,7 @@ final class StyleCleaner {
     }
 
     /** Extracts and validates the single URL argument of a {@code url(...)} function. */
-    private boolean isSafeUrlArgument(String value, int from, int end) {
+    boolean isSafeUrlArgument(String value, int from, int end) {
         int i = from;
         while (i < end && isCssSpace(value.charAt(i))) i++;
         int j = end;
@@ -628,7 +647,7 @@ final class StyleCleaner {
     }
 
     /** Returns the index of the ')' matching the '(' whose argument starts at {@code from}, or {@code -1}. */
-    private int matchingParen(String value, int from, int end) {
+    int matchingParen(String value, int from, int end) {
         int depth = 1;
         int i = from;
         while (i < end) {
@@ -696,7 +715,7 @@ final class StyleCleaner {
         return sb != null ? sb.toString() : value;
     }
 
-    private static boolean isCssSpace(char c) {
+    static boolean isCssSpace(char c) {
         return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f';
     }
 

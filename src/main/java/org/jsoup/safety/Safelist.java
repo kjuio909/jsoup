@@ -648,6 +648,20 @@ public class Safelist {
     }
 
     /**
+     Cleans the text of an allowed {@code style} element (a stylesheet) rule by rule. Selectors and ordinary
+     declarations keep their original order and text; an {@code @import} or a declaration carrying an external
+     * reference ({@code url(...)}, or the legacy {@code expression(...)}) whose URL fails the protocol rules
+     * configured for the tag's style attribute is removed individually. Malformed input never throws.
+     @param tagName the owning tag ({@code style}); selects the applicable protocol configuration
+     @param el the style element, to resolve relative URLs against its document base URI
+     @param css the raw stylesheet text
+     @return the cleaned stylesheet text, or {@code null} if no rule survives (in which case the element is removed)
+     */
+    String cleanStyleSheet(String tagName, Element el, String css) {
+        return StyleSheetCleaner.clean(this, tagName, el, css);
+    }
+
+    /**
      Finds the protocol configuration applicable to external references inside an allowed {@code style} attribute on
      * the given tag, following the same tag to {@code :all} fallback as the other attribute checks. Unlike a
      * {@code href} or {@code srcset}, removing every configured protocol does not open style up to arbitrary

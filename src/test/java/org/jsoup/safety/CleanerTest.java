@@ -774,9 +774,12 @@ public class CleanerTest {
     }
 
     @Test void malformedRawtext() {
+        // the contents of an allowed <style> element are cleaned as a stylesheet: non-CSS raw text such as a broken
+        // end tag is not a valid rule, so the element is removed; malformed raw text elsewhere is still handled safely
         Safelist policy = Safelist.basic().addTags("style");
-        String input = "<style></t</style><img>";
-        assertEquals("<style></t</style>", Jsoup.clean(input, policy));
+        assertEquals("", Jsoup.clean("<style></t</style><img>", policy));
+        // well-formed stylesheet contents are kept (source spelling preserved), other markup dropped as tags
+        assertEquals("<style>p{color:red}</style>", Jsoup.clean("<style>p{color:red}</style><img>", policy));
     }
 
     @Test void srcsetRemovedWhenNotAllowed() {
