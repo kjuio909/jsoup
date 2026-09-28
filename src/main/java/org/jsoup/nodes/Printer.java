@@ -3,6 +3,7 @@ package org.jsoup.nodes;
 import org.jsoup.internal.QuietAppendable;
 import org.jsoup.internal.StringUtil;
 import org.jsoup.nodes.Document.OutputSettings;
+import org.jsoup.parser.Parser;
 import org.jsoup.parser.Tag;
 import org.jsoup.select.NodeVisitor;
 import org.jspecify.annotations.Nullable;
@@ -121,8 +122,13 @@ class Printer implements NodeVisitor {
 
             // if previous is not an inline element
             if (!(prev instanceof Element && !isBlockEl(prev))) {
-                // if there is no previous sib; or not a text node and should be indented
-                if (prev == null || !(prev instanceof TextNode) && shouldIndent(prev))
+                // if there is no previous sib; or not a text node and should be indented. A block prev is always a line
+                // break even when it is the printer root (the first child of the element being printed), as the root
+                // check in shouldIndent is an identity exclusion, not a layout decision -- otherwise the indent we emit
+                // before this text is retained as its leading whitespace, and cleaning the output adds visible space.
+                if (prev == null
+                    || prev instanceof Element && isBlockEl(prev)
+                    || !(prev instanceof TextNode) && shouldIndent(prev))
                     options |= Entities.TrimLeading;
             }
 
@@ -138,7 +144,8 @@ class Printer implements NodeVisitor {
         }
 
         boolean shouldIndent(@Nullable Node node) {
-            if (node == null || node == root || preserveWhitespace || isBlankText(node))
+            if (node == null || node == root || preserveWhitespace || isBlankText(node)
+                || suppressInlineIndent(node))
                 return false;
             if (isBlockEl(node))
                 return true;
@@ -164,6 +171,30 @@ class Printer implements NodeVisitor {
                     (!el.tag.isKnownTag() && (el.parentNode instanceof Document || hasChildBlocks(el)));
             }
 
+            return false;
+        }
+
+        /**
+         When inline indentation is disabled (Cleaner output), checks if the node is contained (at any depth up to the
+         serialization root) in an inline (phrasing) HTML element such as {@code code}, {@code b}, or {@code span} --
+         even one that holds block flow, such as {@code <a><div>}. Cosmetic line breaks are never emitted there in
+         Cleaner output: whitespace inside an inline element is rendered by browsers, so an indentation newline would
+         survive a re-parse as visible text and make cleaning the cleaned output add spaces that were not in the
+         source. Foreign (SVG / MathML) content is always formatted structurally, as its serialization and re-parse
+         treat the surrounding whitespace as insignificant.
+         */
+        private boolean suppressInlineIndent(@Nullable Node node) {
+            if (settings.inlineIndent()) return false;
+            Node parent = node == null ? null : node.parentNode;
+            while (parent != null) {
+                if (parent instanceof Element) {
+                    Element el = (Element) parent;
+                    if (!el.tag.namespace().equals(Parser.NamespaceHtml)) return false; // foreign subtree: indent
+                    if (!isBlockEl(el)) return true;
+                }
+                if (parent == root) break;
+                parent = parent.parentNode;
+            }
             return false;
         }
 

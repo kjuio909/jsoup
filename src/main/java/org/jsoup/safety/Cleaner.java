@@ -17,6 +17,7 @@ import org.jsoup.select.NodeVisitor;
 
 import java.net.MalformedURLException;
 import java.net.URL;
+import java.util.Arrays;
 import java.util.List;
 
 import static org.jsoup.internal.SharedConstants.DummyUri;
@@ -44,6 +45,11 @@ import static org.jsoup.internal.SharedConstants.DummyUri;
 public class Cleaner {
     private final Safelist safelist;
 
+    /** HTML table-internal tags that the parser drops when encountered outside a table (InBody "start tag drop"),
+     sorted for binary search. */
+    private static final String[] TableInternalTags =
+        {"caption", "col", "colgroup", "frame", "head", "tbody", "td", "tfoot", "th", "thead", "tr"};
+
     /**
      Create a new cleaner, that sanitizes documents using the supplied safelist.
      @param safelist safe-list to clean with
@@ -61,13 +67,50 @@ public class Cleaner {
      @return cleaned document.
      */
     public Document clean(Document dirtyDocument) {
+        return cleanWithStats(dirtyDocument).document();
+    }
+
+    /**
+     The result of a {@link #cleanWithStats(Document)} run: the cleaned document and a count of what was discarded.
+     */
+    public static final class CleanOutcome {
+        private final Document document;
+        private final int discarded;
+
+        CleanOutcome(Document document, int discarded) {
+            this.document = document;
+            this.discarded = discarded;
+        }
+
+        /** The cleaned document. */
+        public Document document() {
+            return document;
+        }
+
+        /**
+         Number of nodes and attributes that were removed because the safelist did not allow them (including rejected
+         comments and processing instructions). Zero means every element and attribute in the input was allowed.
+         */
+        public int discarded() {
+            return discarded;
+        }
+    }
+
+    /**
+     Cleans the document like {@link #clean(Document)} and additionally reports how many nodes and attributes were
+     discarded. The report lets callers (such as {@link org.jsoup.Jsoup#clean(String, Safelist)}) skip further
+     normalization passes when the input was already entirely allowed.
+     @param dirtyDocument Untrusted base document to clean.
+     @return the cleaned document together with the discarded count.
+     */
+    public CleanOutcome cleanWithStats(Document dirtyDocument) {
         Validate.notNull(dirtyDocument);
 
         Document clean = Document.createShell(dirtyDocument.baseUri());
-        copySafeNodes(dirtyDocument.body(), clean.body());
-        clean.outputSettings(dirtyDocument.outputSettings().clone());
+        int discarded = copySafeNodes(dirtyDocument.body(), clean.body());
+        clean.outputSettings(dirtyDocument.outputSettings().clone().inlineIndent(false));
 
-        return clean;
+        return new CleanOutcome(clean, discarded);
     }
 
     /**
@@ -151,6 +194,14 @@ public class Cleaner {
                 Element sourceEl = (Element) source;
 
                 if (safelist.isSafeTag(sourceEl.normalName())) { // safe, clone and copy safe attrs
+                    if (isUnwrappableTableContent(sourceEl)) {
+                        // an allowed table-internal tag (td, tr, ...) that the parser placed outside of any table
+                        // context (e.g. inside a <noscript> that the safelist rejects). Keeping it would not survive a
+                        // re-parse (the parser drops these tags at that insertion mode), so treat it like any other
+                        // rejected wrapper: promote its safe children in place.
+                        numDiscarded++;
+                        return;
+                    }
                     ElementMeta meta = createSafeElement(sourceEl);
                     Element destChild = meta.el;
                     destination.appendChild(destChild);
@@ -162,8 +213,17 @@ public class Cleaner {
                 }
             } else if (source instanceof TextNode) {
                 TextNode sourceText = (TextNode) source;
-                TextNode destText = new TextNode(sourceText.getWholeText());
-                destination.appendChild(destText);
+                Node last = destination.lastChild();
+                if (last instanceof TextNode) {
+                    // promoting text out of rejected wrappers (and unwrapped orphan table cells) can place adjacent
+                    // text nodes in the destination. Their boundary is invisible on re-parse, where whitespace across
+                    // it is collapsed once -- merge so the pretty printer does not normalize each side independently
+                    // and emit spaces that a second clean would remove.
+                    TextNode lastText = (TextNode) last;
+                    lastText.text(lastText.getWholeText() + sourceText.getWholeText());
+                } else {
+                    destination.appendChild(new TextNode(sourceText.getWholeText()));
+                }
             } else if (source instanceof DataNode && safelist.isSafeTag(source.parent().normalName())) {
                 DataNode sourceData = (DataNode) source;
                 DataNode destData = new DataNode(sourceData.getWholeData());
@@ -174,9 +234,26 @@ public class Cleaner {
         }
 
         @Override public void tail(Node source, int depth) {
-            if (source instanceof Element && safelist.isSafeTag(source.normalName())) {
-                destination = destination.parent(); // would have descended, so pop destination stack
+            if (source instanceof Element) {
+                Element sourceEl = (Element) source;
+                if (safelist.isSafeTag(sourceEl.normalName()) && !isUnwrappableTableContent(sourceEl)) {
+                    destination = destination.parent(); // descended into a copied element, so pop destination stack
+                }
             }
+        }
+
+        /**
+         Table-internal tags only exist inside a table. When the parser nevertheless produced one outside of any
+         table context (it tolerates e.g. {@code <td>} inside {@code <noscript>}), and no {@code <table>} ancestor is
+         being copied into the clean document, the tag must not be emitted: on re-parse in that context it is dropped,
+         changing the structure. Its safe subtree is promoted in place, as for a rejected wrapper.
+         */
+        private boolean isUnwrappableTableContent(Element sourceEl) {
+            if (Arrays.binarySearch(TableInternalTags, sourceEl.normalName()) < 0) return false;
+            for (Element ctx = destination; ctx != null; ctx = ctx.parent()) {
+                if (ctx.normalName().equals("table")) return false; // a table is being kept around it
+            }
+            return true;
         }
     }
 

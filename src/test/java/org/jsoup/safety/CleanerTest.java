@@ -701,4 +701,90 @@ public class CleanerTest {
         String input = "<style></t</style><img>";
         assertEquals("<style></t</style>", Jsoup.clean(input, policy));
     }
+
+    private static void assertIdempotentClean(String html, Safelist safelist) {
+        String once = Jsoup.clean(html, safelist);
+        String twice = Jsoup.clean(once, safelist);
+        String thrice = Jsoup.clean(twice, safelist);
+        assertEquals(once, twice, "cleaning the cleaned output changed it");
+        assertEquals(twice, thrice, "cleaning did not reach a fixed point");
+
+        Document.OutputSettings compact = new Document.OutputSettings().prettyPrint(false);
+        String compactOnce = Jsoup.clean(html, "", safelist, compact);
+        String compactTwice = Jsoup.clean(compactOnce, "", safelist, new Document.OutputSettings().prettyPrint(false));
+        assertEquals(compactOnce, compactTwice, "cleaning changed compact output");
+    }
+
+    @Test void textAfterBlockIsIdempotent() {
+        // https://github.com/jhy/jsoup: the indent newline before text following the first-child block used to be
+        // kept as leading text whitespace, so a second clean inserted a visible space
+        assertIdempotentClean("<p>a</p>x", Safelist.relaxed());
+        assertIdempotentClean("<ul><li>a</li></ul>x", Safelist.relaxed());
+        assertIdempotentClean("<table><tr><td>x</td></tr></table>y", Safelist.relaxed());
+        assertEquals("<p>a</p>\nx", Jsoup.clean("<p>a</p>x", Safelist.relaxed()));
+    }
+
+    @Test void noCosmeticWhitespaceInsideInlineElements() {
+        // an indentation newline inside an inline element is rendered as a space, so it must not be emitted
+        Safelist safelist = Safelist.none().addTags("code", "br", "b", "p");
+        assertIdempotentClean("<code><br>x</code>", safelist);
+        assertIdempotentClean("<b><br>z</b>", safelist);
+        assertEquals("<code><br>x</code>", Jsoup.clean("<code><br>x</code>", safelist));
+        assertEquals("<b><br>z</b>", Jsoup.clean("<b><br>z</b>", safelist));
+        // block flow inside an inline element stays on one line too
+        assertIdempotentClean("<span><div>x</div></span>", Safelist.relaxed());
+    }
+
+    @Test void promotedTextAcrossRejectedWrappersIsStable() {
+        // adjacent promoted text nodes share a boundary that the parser collapses; they must be one text node
+        Safelist safelist = Safelist.none().addTags("p", "b", "i");
+        assertIdempotentClean("<center><p>One</p><p>Two</p></center>", safelist);
+        assertIdempotentClean("<div><span><b>1</b><i>2</i></span></div>", safelist);
+        assertEquals("<p>One</p>\n<p>Two</p>", Jsoup.clean("<center><p>One</p><p>Two</p></center>", safelist));
+    }
+
+    @Test void orphanTableInternalTagIsUnwrapped() {
+        // the parser tolerates a <td> directly inside <noscript>; on reparse there it is dropped, so the cleaner must
+        // promote its safe subtree instead of keeping a tag that only exists within a table
+        Safelist safelist = Safelist.none().addTags("p", "b", "i", "table", "tr", "td");
+        assertIdempotentClean("<noscript><td>k<p>a</p>z</td></noscript>", safelist);
+        String clean = Jsoup.clean("<noscript><td>k<p>a</p>z</td></noscript>", safelist);
+        assertFalse(clean.contains("td"), clean);
+        assertTrue(clean.contains("<p>a</p>"), clean);
+    }
+
+    @Test void malformedTreeConvergesToFixedPoint() {
+        // nested paragraphs, foster-parented content and other parser recovery must be applied before emitting
+        Safelist safelist = Safelist.none().addTags("p", "b", "i", "table", "tr", "td");
+        assertIdempotentClean("<p>a<p></p></p>", safelist);
+        assertIdempotentClean("<table><p>x</p><tr><td>y</td></tr></table>",
+            Safelist.none().addTags("table", "tr", "td", "p"));
+    }
+
+    @Test void preservesPreTextareaWhitespace() {
+        Safelist safelist = Safelist.none().addTags("pre", "textarea");
+        assertIdempotentClean("<pre>  a\n b </pre>", safelist);
+        assertIdempotentClean("<textarea>  x\ny &lt; z &amp; w</textarea>", safelist);
+        assertEquals("<pre>  a\n b </pre>", Jsoup.clean("<pre>  a\n b </pre>", safelist));
+        assertEquals("<textarea>  x\ny &lt; z &amp; w</textarea>",
+            Jsoup.clean("<textarea>  x\ny &lt; z &amp; w</textarea>", safelist));
+    }
+
+    @Test void scriptWrappingTextKeepsTextWithoutExecutableContent() {
+        Safelist safelist = Safelist.none().addTags("p");
+        String clean = Jsoup.clean("<p>Hello<script>alert(1)</script>world</p>", safelist);
+        assertEquals("<p>Helloworld</p>", clean);
+        assertEquals(clean, Jsoup.clean(clean, safelist));
+        assertEquals("", Jsoup.clean("<script>x</script><style>y</style>", safelist));
+        assertEquals("", Jsoup.clean("", safelist));
+    }
+
+    @Test void doesNotModifyCallerDocument() {
+        // Cleaner.clean(Document) builds a new document and must leave the caller's parsed document untouched
+        Safelist safelist = Safelist.none().addTags("p");
+        Document original = Jsoup.parseBodyFragment("<p onclick=1>Hi<script>x</script></p>");
+        String before = original.body().html();
+        new Cleaner(safelist).clean(original);
+        assertEquals(before, original.body().html());
+    }
 }

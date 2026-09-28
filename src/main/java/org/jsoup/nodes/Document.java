@@ -342,6 +342,10 @@ public class Document extends Element {
         private Charset charset = DataUtil.UTF_8;
         private boolean prettyPrint = true;
         private boolean outline = false;
+        // when false, the pretty printer does not insert cosmetic line breaks inside inline (phrasing) elements.
+        // Enabled for Cleaner output: an indentation newline inside an inline element would be rendered as visible
+        // whitespace, so cleaning cleaned output would otherwise add spaces that were not in the source.
+        private boolean inlineIndent = true;
         private int indentAmount = 1;
         private int maxPaddingWidth = 30;
         private Syntax syntax = Syntax.html;
@@ -470,6 +474,26 @@ public class Document extends Element {
          */
         public OutputSettings outline(boolean outlineMode) {
             outline = outlineMode;
+            return this;
+        }
+
+        /**
+         Get if the pretty printer inserts cosmetic line breaks inside inline (phrasing) elements. Default is true.
+         @return if inline elements are indented
+         */
+        public boolean inlineIndent() {
+            return inlineIndent;
+        }
+
+        /**
+         Toggle cosmetic line breaks inside inline (phrasing) elements. The {@link org.jsoup.safety.Cleaner} disables
+         this so that cleaning output is stable when cleaned again: an indentation newline inside an inline element
+         would otherwise be re-parsed as rendered whitespace and add a visible space.
+         @param inlineIndent false to keep inline element content on one line
+         @return the document's output settings, for chaining
+         */
+        public OutputSettings inlineIndent(boolean inlineIndent) {
+            this.inlineIndent = inlineIndent;
             return this;
         }
 

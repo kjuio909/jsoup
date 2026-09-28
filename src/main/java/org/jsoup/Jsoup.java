@@ -4,6 +4,8 @@ import org.jsoup.helper.DataUtil;
 import org.jsoup.helper.HttpConnection;
 import org.jsoup.nodes.Document;
 import org.jsoup.nodes.Element;
+import org.jsoup.nodes.Node;
+import org.jsoup.parser.ParseErrorList;
 import org.jsoup.parser.Parser;
 import org.jsoup.safety.Cleaner;
 import org.jsoup.safety.Safelist;
@@ -14,6 +16,7 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.net.URL;
 import java.nio.file.Path;
+import java.util.List;
 
 import static org.jsoup.internal.SharedConstants.DummyUri;
 
@@ -348,10 +351,7 @@ Connection con3 = session.newRequest();
             baseUri = DummyUri; // set a placeholder URI to allow relative links to pass abs resolution for protocol tests; won't leak to output
         }
 
-        Document dirty = parseBodyFragment(bodyHtml, baseUri);
-        Cleaner cleaner = new Cleaner(safelist);
-        Document clean = cleaner.clean(dirty);
-        return clean.body().html();
+        return stabilizeClean(bodyHtml, baseUri, safelist, null);
     }
 
     /**
@@ -403,11 +403,48 @@ Connection con3 = session.newRequest();
      * @see Cleaner#clean(Document)
      */
     public static String clean(String bodyHtml, String baseUri, Safelist safelist, Document.OutputSettings outputSettings) {
-        Document dirty = parseBodyFragment(bodyHtml, baseUri);
+        return stabilizeClean(bodyHtml, baseUri, safelist, outputSettings);
+    }
+
+    /** Upper bound on clean passes while converging to the re-parse fixed point. */
+    private static final int MaxCleanPasses = 8;
+
+    /**
+     Cleans the fragment and repeats (parse the previous output, clean again, serialize) until the output is identical
+     to what cleaning its own output produces. The first clean mirrors the parsed -- and possibly malformed -- source
+     tree; parser recovery that only happens on a fresh parse (a nested paragraph split apart, fostered table
+     content, a nested anchor flattened) could otherwise leave the cleaned result in a structure that changes when it
+     is parsed and cleaned a second time, which would violate the contract that cleaning is idempotent. Convergence is
+     reached immediately for already-stable input. (The {@link Cleaner#clean(Document)} API does not run this pass, so
+     it can retain source position tracking and the caller's attribute casing.)
+     */
+    private static String stabilizeClean(String bodyHtml, String baseUri, Safelist safelist,
+        Document.OutputSettings outputSettings) {
         Cleaner cleaner = new Cleaner(safelist);
-        Document clean = cleaner.clean(dirty);
-        clean.outputSettings(outputSettings);
-        return clean.body().html();
+
+        // Parse the input while tracking recovery: if every element and attribute is allowed and the parser made no
+        // recovery corrections, the copied tree is already the parser's fixed point and a single clean is stable.
+        Document first = Document.createShell(baseUri);
+        ParseErrorList errors = ParseErrorList.tracking(1);
+        List<Node> nodes = Parser.parseFragment(bodyHtml, first.body(), baseUri, errors);
+        first.body().insertChildren(0, nodes);
+        Cleaner.CleanOutcome outcome = cleaner.cleanWithStats(first);
+        if (outputSettings != null)
+            outcome.document().outputSettings(outputSettings.clone().inlineIndent(false));
+        String previous = outcome.document().body().html();
+        if (outcome.discarded() == 0 && errors.isEmpty()) return previous;
+
+        // Otherwise the clean mirrors a malformed/rejected source tree; repeat parse+clean until the serialization
+        // equals cleaning itself, so a second clean neither removes safe content nor introduces whitespace.
+        for (int pass = 1; pass < MaxCleanPasses; pass++) {
+            Document clean = cleaner.clean(parseBodyFragment(previous, baseUri));
+            if (outputSettings != null)
+                clean.outputSettings(outputSettings.clone().inlineIndent(false));
+            String next = clean.body().html();
+            if (next.equals(previous)) return next;
+            previous = next;
+        }
+        return previous;
     }
 
     /**
