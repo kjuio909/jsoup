@@ -87,6 +87,47 @@ public class StyleCleanerTest {
         assertEquals("<div style=\"color:red\">x</div>", clean(html), value);
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {
+        "\\75 rl(javascript:alert(1))", // \75 + space decodes to "u" -> url(
+        "\\000075 rl(javascript:alert(1))", // six-digit hex escape
+        "\\75rl(javascript:alert(1))", // escape directly joined to the remainder
+        "\\75\\72\\6c(javascript:alert(1))", // one escape per letter
+        "\\u\\72\\6c(javascript:1)", // a literal escape mixed with hex escapes
+        "\\55\\52\\4c (javascript:1)", // uppercase URL spelled entirely in escapes
+        "expres\\73 ion(alert(1))", // escape in the middle of "expression"
+        "\\65 xpression(alert(1))", // escaped leading "e"
+        "\\65\\78\\70\\72\\65\\73\\73 ion(1)", // "expression" spelled in hex escapes
+    })
+    void rejectsReferencesHiddenBehindCssEscapedFunctionNames(String value) {
+        // the browser unescapes the identifier to url(...)/expression(...) before fetching, so the whole
+        // declaration must go; only the independently parseable safe sibling survives
+        assertEquals("<div style=\"color:red\">x</div>",
+            clean("<div style=\"color:red;background:" + value + "\">x</div>"), value);
+        assertEquals("<div>x</div>",
+            clean("<div style=\"background:" + value + "\">x</div>"), value);
+        // the same obfuscation is caught inside a custom property and inside another function
+        assertEquals("<div style=\" color:red\">x</div>",
+            clean("<div style=\"--x: " + value + "; color:red\">x</div>"), value);
+        assertEquals("<div>x</div>",
+            clean("<div style=\"background:var(--y, " + value + ")\">x</div>"), value);
+    }
+
+    @Test void legitimateEscapedIdentifiersAreNotRejected() {
+        // an escaped space inside an unquoted font-family identifier stays verbatim
+        assertEquals("<div style=\"font-family: Ahem\\ Free\">x</div>",
+            clean("<div style=\"font-family: Ahem\\ Free\">x</div>"));
+        // an escaped letter in an ordinary value survives
+        assertEquals("<div style=\"color: re\\64\">x</div>",
+            clean("<div style=\"color: re\\64\">x</div>"));
+        // a non-reference function whose name happens to use an escape stays
+        assertEquals("<div style=\"width:\\63 alc(100%)\">x</div>",
+            clean("<div style=\"width:\\63 alc(100%)\">x</div>"));
+        // an escaped but safe custom-property value is preserved
+        assertEquals("<div style=\"--x: a\\ b\">x</div>",
+            clean("<div style=\"--x: a\\ b\">x</div>"));
+    }
+
     @Test void dangerousSchemeAsOnlyDeclarationRemovesAttribute() {
         assertEquals("<div>x</div>", clean("<div style=\"background:url(javascript:alert(1))\">x</div>"));
     }

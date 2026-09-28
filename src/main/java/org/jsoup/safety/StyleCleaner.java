@@ -301,7 +301,6 @@ final class StyleCleaner {
         int i = start;
         while (i < end) {
             char c = value.charAt(i);
-            if (c == '\\') { i += 2; continue; }
             if (c == '"' || c == '\'') {
                 int[] quote = scanQuoted(value, i + 1, c);
                 if (quote[1] != 1) return false; // no bad-string recovery inside a value being checked
@@ -326,9 +325,10 @@ final class StyleCleaner {
                 continue;
             }
             if (c == '@') return false; // no at-rule (e.g. a buried @import) is valid inside a declaration value
-            if (isIdentStart(c) || c == '-') {
+            if (isIdentStart(c) || c == '-' || c == '\\') { // a backslash starts an escaped identifier, e.g. \75 rl(
                 int[] name = readName(value, i, end);
                 int nameEnd = name[0];
+                if (nameEnd == i) { i++; continue; } // a trailing lone backslash consumes no token
                 String fnName = name[1] == 1 ? unescape(value.substring(i, nameEnd)) : value.substring(i, nameEnd);
                 int j = skipSeparators(value, nameEnd, end);
                 if (j < end && value.charAt(j) == '(') {
@@ -366,7 +366,11 @@ final class StyleCleaner {
     /**
      Reads a CSS name token (identifier characters, plus backslash escapes) from {@code from}. Returns
      {@code [end, escaped]}: {@code end} is the index after the token, and {@code escaped} is 1 when it contained a
-     backslash. A leading run of dashes is consumed so that e.g. {@code -moz-binding} reads as one token.
+     backslash. Escapes are spanned the way the tokenizer reads them — a {@code \}{@code hEX} run (up to six hex
+     digits, optionally followed by one whitespace delimiter) or a backslash plus any other single code point — so a
+     name such as {@code \75 rl} or {@code \65\78\70\72\65\73\73 ion} is recognized as the single identifier a
+     browser sees ("url", "expression"), rather than being split into an unrecognized fragment. A leading run of
+     dashes is consumed as well.
      */
     private int[] readName(String value, int from, int end) {
         int i = from;
@@ -376,7 +380,15 @@ final class StyleCleaner {
             if (c == '\\') {
                 if (i + 1 >= end) break;
                 escaped = 1;
-                i += 2;
+                int h = i + 1;
+                int hexEnd = h;
+                while (hexEnd < end && hexEnd - h < 6 && isHex(value.charAt(hexEnd))) hexEnd++;
+                if (hexEnd > h) {
+                    i = hexEnd;
+                    if (i < end && isCssSpace(value.charAt(i))) i++; // one whitespace delimiter after a hex escape
+                } else {
+                    i += 2; // any other backslash escape stands for the escaped code point
+                }
                 continue;
             }
             if (isIdentChar(c)) { i++; continue; }
@@ -397,14 +409,14 @@ final class StyleCleaner {
         int i = 0;
         while (i < end) {
             char c = text.charAt(i);
-            if (c == '\\') { i += 2; continue; }
             if (c == '@' && matchesName(text, i + 1, end, "import")) {
                 if (!freeTextImportIsSafe(text, i + 7, end)) return false;
                 i += 7;
                 continue;
             }
-            if (isIdentStart(c) || c == '-') {
+            if (isIdentStart(c) || c == '-' || c == '\\') { // a backslash starts an escaped identifier, e.g. \75 rl(
                 int[] name = readName(text, i, end);
+                if (name[0] == i) { i++; continue; } // a trailing lone backslash consumes no token
                 int j = skipSeparators(text, name[0], end);
                 if (j < end && text.charAt(j) == '(') {
                     String fnName = name[1] == 1 ? unescape(text.substring(i, name[0])) : text.substring(i, name[0]);
