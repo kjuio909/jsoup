@@ -162,8 +162,7 @@ public class Cleaner {
                 }
             } else if (source instanceof TextNode) {
                 TextNode sourceText = (TextNode) source;
-                TextNode destText = new TextNode(sourceText.getWholeText());
-                destination.appendChild(destText);
+                appendSafeText(destination, sourceText.getWholeText());
             } else if (source instanceof DataNode && safelist.isSafeTag(source.parent().normalName())) {
                 DataNode sourceData = (DataNode) source;
                 DataNode destData = new DataNode(sourceData.getWholeData());
@@ -184,6 +183,23 @@ public class Cleaner {
         CleaningVisitor cleaningVisitor = new CleaningVisitor(source, dest);
         cleaningVisitor.traverse(source);
         return cleaningVisitor.numDiscarded;
+    }
+
+    /**
+     Appends safe text to the destination, coalescing it with an immediately preceding text node. The HTML parser
+     never holds adjacent text nodes -- a run of characters is a single node -- but removing a disallowed wrapper
+     (such as a {@code <script>} or {@code <font>}) can leave the text from its two sides as neighbouring nodes in
+     the cleaned tree. Re-parsing the serialized output merges them back together; coalescing here keeps the cleaned
+     document identical to what its own output parses to, so whitespace decisions stay stable on a second clean.
+     */
+    private static void appendSafeText(Element destination, String text) {
+        Node lastChild = destination.lastChild();
+        if (lastChild instanceof TextNode) {
+            TextNode lastText = (TextNode) lastChild;
+            lastText.text(lastText.getWholeText().concat(text));
+        } else {
+            destination.appendChild(new TextNode(text));
+        }
     }
 
     private ElementMeta createSafeElement(Element sourceEl) {

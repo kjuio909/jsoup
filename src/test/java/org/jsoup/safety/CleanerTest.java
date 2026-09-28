@@ -756,6 +756,36 @@ public class CleanerTest {
         assertEquals(textarea, Jsoup.clean(textarea, safelist));
     }
 
+    @Test void textAroundRemovedElementCoalescesIntoOneNode() {
+        // the parser holds a character run as a single text node; removing the disallowed <script> must not split the
+        // surrounding text into two neighbouring nodes, or pretty-printing would trim it differently after reparse
+        Safelist safelist = Safelist.none().addTags("p", "div", "h1", "pre", "textarea");
+        String[] inputs = {
+            "<p></p> <script> a</script>\n&lt;b&gt;",
+            "<h1></h1>\n<script>a&nbsp;b\n</script>\n&amp; <div></div>",
+            "<div href='x'></div>\n\t \n\t <script> a &amp;amp;</script> a text a",
+            "<pre>\na </pre>\n\n<script></script> a \t",
+            "<div><script>\n</script> a&lt;b&gt;<textarea></textarea></div>    <script></script> a ",
+        };
+        for (String input : inputs) {
+            String clean1 = Jsoup.clean(input, safelist);
+            String clean2 = Jsoup.clean(clean1, safelist);
+            assertEquals(clean1, clean2, "re-clean must not add or drop whitespace for: " + input);
+        }
+        // concrete outputs: the leading space that used to survive only on the first clean is consistently dropped
+        assertEquals("<p></p>\n&lt;b&gt;", Jsoup.clean(inputs[0], safelist));
+        assertEquals("<h1></h1>\n&amp;\n<div></div>", Jsoup.clean(inputs[1], safelist));
+        assertEquals("<div></div>\na text a", Jsoup.clean(inputs[2], safelist));
+        assertEquals("<pre>a </pre>\na", Jsoup.clean(inputs[3], safelist));
+    }
+
+    @Test void textOnBothSidesOfRejectedWrapperIsKeptInOrderOnce() {
+        // safe text flanking a removed element is retained exactly once, in original order, as one run
+        Safelist safelist = Safelist.none();
+        assertEquals("abc", Jsoup.clean("a<script>x</script>b<script>y</script>c", safelist));
+        assertEquals("foo bar baz", Jsoup.clean("foo <font> bar</font> baz", Safelist.none()));
+    }
+
     @Test void entitiesAreDecodedOnlyOnce() {
         Safelist safelist = Safelist.none().addTags("p");
         String once = Jsoup.clean("<p>&amp;amp; &lt;img src=x&gt;</p>", safelist);
