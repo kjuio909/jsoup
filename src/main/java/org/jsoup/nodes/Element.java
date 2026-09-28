@@ -2012,7 +2012,23 @@ public class Element extends Node implements Iterable<Element> {
             }
         } else {
             accum.append('>');
+            if (needsLeadingNewlineCompensation(out))
+                accum.append('\n');
         }
+    }
+
+    /**
+     The HTML parser consumes a single line feed immediately following a {@code <pre>} or {@code <listing>} start
+     tag (per the HTML spec). HTML serialization mirrors that by emitting an additional line feed after the start tag
+     when the element's first child is a text node that itself starts with a line feed. Without this, one intended
+     line feed would be lost on every serialize -> reparse round trip (so a second clean of clean output would drop a
+     newline). Other elements and non-leading-newline content are unaffected.
+     */
+    private boolean needsLeadingNewlineCompensation(Document.OutputSettings out) {
+        if (out.syntax() == xml || !tag.namespace().equals(NamespaceHtml)) return false;
+        if (!nameIs("pre") && !nameIs("listing")) return false;
+        Node first = childNodes.get(0);
+        return first instanceof TextNode && ((TextNode) first).getWholeText().startsWith("\n");
     }
 
     @Override

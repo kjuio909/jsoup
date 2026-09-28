@@ -831,4 +831,77 @@ public class CleanerTest {
         assertEquals(original, dirty.body().html()); // source document untouched
         assertEquals("<p>a <b>b</b></p>c", TextUtil.stripNewlines(c1));
     }
+
+    // Inline elements that contain block-level content: pretty-printer indentation must not re-parse as literal
+    // whitespace and accumulate on repeated cleans.
+
+    @Test void idempotentWhenInlineElementContainsBlocks() {
+        Safelist safelist = Safelist.none().addTags("a", "div", "b", "br", "span", "p");
+        String[][] cases = {
+            {"<a><div></div></a>", "<a>\n <div></div>\n</a>"},
+            {"<a>x<div>y</div></a>", "<a>x\n <div>y</div></a>"},
+            {"<b><br>text</b>", "<b>\n <br>text\n</b>"},
+            {"<span><p></p><span></span></span>", "<span>\n <p></p>\n <span></span>\n</span>"},
+        };
+        for (String[] c : cases) {
+            String clean1 = Jsoup.clean(c[0], safelist);
+            assertEquals(c[1], clean1, "first clean of " + c[0]);
+            assertEquals(clean1, Jsoup.clean(clean1, safelist), "second clean of " + c[0]);
+            assertEquals(clean1, Jsoup.clean(Jsoup.clean(clean1, safelist), safelist), "third clean of " + c[0]);
+        }
+    }
+
+    @Test void inlineBlockLayoutKeepsWordBoundaryAndSignificantWhitespace() {
+        Safelist safelist = Safelist.none().addTags("a", "div", "span");
+        String html = "<a>Hello <div>there</div> <span>now</span></a>";
+        String clean1 = Jsoup.clean(html, safelist);
+        assertEquals("<a>Hello\n <div>there</div>\n <span>now</span></a>", clean1);
+        assertEquals(clean1, Jsoup.clean(clean1, safelist));
+        assertEquals("Hello there now", Jsoup.parseBodyFragment(clean1).text()); // words stay separated by the block edges
+    }
+
+    @Test void idempotentWithLineBreakElementInsideInline() {
+        Safelist safelist = Safelist.none().addTags("a", "br");
+        String clean1 = Jsoup.clean("<a>word<br></a>", safelist);
+        assertEquals("<a>word\n <br></a>", clean1);
+        assertEquals(clean1, Jsoup.clean(clean1, safelist));
+        assertEquals("word", Jsoup.parseBodyFragment(clean1).text().trim());
+    }
+
+    // The HTML parser consumes one LF after a <pre>/<listing> start tag; serialization adds it back so a leading
+    // newline survives serialize -> reparse, and cleaning such output is a fixed point.
+
+    @Test void preLeadingNewlineRoundTripsAndIsIdempotent() {
+        Safelist safelist = Safelist.none().addTags("pre", "listing", "p");
+        String[][] cases = {
+            {"<pre>\nline\n</pre>", "<pre>line\n</pre>"},        // single leading LF is source-consumed by the parser
+            {"<pre>\n\nx</pre>", "<pre>\n\nx</pre>"},            // the remaining leading LF is preserved on round trip
+            {"<listing>\nx</listing>", "<listing>x</listing>"},
+        };
+        for (String[] c : cases) {
+            String clean1 = Jsoup.clean(c[0], safelist);
+            assertEquals(c[1], clean1, "first clean of " + c[0]);
+            assertEquals(clean1, Jsoup.clean(clean1, safelist), "second clean of " + c[0]);
+        }
+
+        // explicit: output that retains a leading LF stays stable and keeps the newline as text
+        String pre = "<pre>\n\nx</pre>";
+        String clean = Jsoup.clean(pre, safelist);
+        assertEquals(pre, clean);
+        assertEquals(pre, Jsoup.clean(clean, safelist));
+        assertEquals("\nx", Jsoup.parseBodyFragment(clean).selectFirst("pre").wholeText());
+    }
+
+    @Test void noPrettyPrintLeavesInlineWhitespaceUntouched() {
+        Safelist safelist = Safelist.none().addTags("a", "div", "pre", "b", "br");
+        Document.OutputSettings out = new Document.OutputSettings().prettyPrint(false);
+
+        String clean1 = Jsoup.clean("<a>\n <div></div>\n</a>", "", safelist, out);
+        assertEquals("<a>\n <div></div>\n</a>", clean1); // no normalization without pretty printing
+        assertEquals(clean1, Jsoup.clean(clean1, "", safelist, out));
+
+        String pre = Jsoup.clean("<pre>\nx</pre>", "", safelist, out);
+        assertEquals("<pre>x</pre>", pre);
+        assertEquals(pre, Jsoup.clean(pre, "", safelist, out));
+    }
 }

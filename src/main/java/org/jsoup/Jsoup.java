@@ -404,9 +404,9 @@ Connection con3 = session.newRequest();
      */
     public static String clean(String bodyHtml, String baseUri, Safelist safelist, Document.OutputSettings outputSettings) {
         Document dirty = parseBodyFragment(bodyHtml, baseUri);
+        dirty.outputSettings(outputSettings); // applied before cleaning so the cleaner's normalization matches the output
         Cleaner cleaner = new Cleaner(safelist);
         Document clean = cleaner.clean(dirty);
-        clean.outputSettings(outputSettings);
         return clean.body().html();
     }
 

@@ -17,6 +17,7 @@ import org.jsoup.select.NodeVisitor;
 
 import java.net.MalformedURLException;
 import java.net.URL;
+import java.util.ArrayList;
 import java.util.List;
 
 import static org.jsoup.internal.SharedConstants.DummyUri;
@@ -66,8 +67,111 @@ public class Cleaner {
         Document clean = Document.createShell(dirtyDocument.baseUri());
         copySafeNodes(dirtyDocument.body(), clean.body());
         clean.outputSettings(dirtyDocument.outputSettings().clone());
+        if (clean.outputSettings().prettyPrint())
+            normaliseLayoutWhitespace(clean.body());
 
         return clean;
+    }
+
+    /**
+     Removes non-significant whitespace text nodes from the cleaned tree so that the output is a fixed point under a
+     clean -> serialize -> reparse -> clean round trip.
+
+     <p>The pretty printer emits its own line breaks and indentation around block-level nodes (and {@code <br>}). For
+     block parents, any whitespace text node butting against such a node is trimmed while printing. For inline
+     parents (an {@code <a>}, {@code <b>}, and so on that contain block-level content), the whitespace is normally
+     significant and printed literally; the printer then adds its own indentation as well. On reparse that
+     indentation becomes a literal text node, so a second clean would gain extra spaces (and so on). The nodes
+     responsible are the whitespace-only text nodes sitting at these block boundaries; dropping them changes no
+     visible text, since the boundary (or the word gap into a block element) is rendered independently. Whitespace
+     attached to real words (e.g. {@code "Hello "}) and anything inside a whitespace-preserving context such as
+     {@code <pre>}, {@code <code>}, or {@code <textarea>} is left untouched.</p>
+     */
+    private void normaliseLayoutWhitespace(Element root) {
+        for (Element el : root.getAllElements()) {
+            if (!isInlineContainer(el)) continue;
+            if (preservesWhitespace(el)) continue;
+            boolean blockLayout = isBlockLike(nextNonBlank(el.firstChild()));
+
+            List<Node> children = new ArrayList<>(el.childNodes()); // live references; childNodesCopy() returns clones
+            for (Node child : children) {
+                if (!(child instanceof TextNode)) continue;
+                TextNode text = (TextNode) child;
+                Node prevNonBlank = previousNonBlank(text.previousSibling());
+                Node nextNonBlank = nextNonBlank(text.nextSibling());
+                boolean facesBlockPrev = isBlockLike(prevNonBlank);
+                boolean facesBlockNext = isBlockLike(nextNonBlank);
+                boolean atClosingEdge = nextNonBlank == null && blockLayout;
+
+                if (text.isBlank()) {
+                    // whitespace-only node: drop it wherever the printer emits its own line break -- next to a block
+                    // sibling, or at the element's indented close tag
+                    if (facesBlockPrev || facesBlockNext || atClosingEdge)
+                        text.remove();
+                } else if (facesBlockNext || atClosingEdge) {
+                    // Last real content before a directly-following block sibling, or before the element's own
+                    // indented close tag: trailing ASCII whitespace is the (regenerated) line break. The emitted
+                    // newline re-parses as the word gap, so rendered text is unchanged; &nbsp; and leading text kept.
+                    trimTrailingHtmlWhitespace(text);
+                }
+            }
+        }
+    }
+
+    private static void trimTrailingHtmlWhitespace(TextNode text) {
+        String whole = text.getWholeText();
+        int end = whole.length();
+        while (end > 0 && isHtmlWhitespace(whole.charAt(end - 1))) end--;
+        if (end < whole.length()) text.text(whole.substring(0, end));
+    }
+
+    /** An element that lays out inline but can be found containing block-level children after cleaning. */
+    private static boolean isInlineContainer(Element el) {
+        return !isBlockLike(el);
+    }
+
+    /** Mirrors the pretty printer's notion of a node that gets its own line: block elements, {@code <br>}, and
+     unknown elements that contain block content. */
+    private static boolean isBlockLike(Node node) {
+        if (!(node instanceof Element)) return false;
+        Element el = (Element) node;
+        return el.nameIs("br") || el.tag().isBlock()
+            || (!el.tag().isKnownTag() && hasBlockChild(el));
+    }
+
+    private static boolean hasBlockChild(Element el) {
+        Element child = el.firstElementChild();
+        for (int i = 0; i < 5 && child != null; i++) {
+            if (child.tag().isBlock() || !child.tag().isKnownTag()) return true;
+            child = child.nextElementSibling();
+        }
+        return false;
+    }
+
+    /** Whether the element is, or sits within five levels of, a tag such as pre/code/textarea that keeps
+     whitespace verbatim (mirrors Element#preserveWhitespace). */
+    private static boolean preservesWhitespace(Node node) {
+        int depth = 0;
+        while (node instanceof Element && depth < 6) {
+            if (((Element) node).tag().preserveWhitespace()) return true;
+            node = node.parentNode();
+            depth++;
+        }
+        return false;
+    }
+
+    private static Node previousNonBlank(Node node) {
+        while (isBlankText(node)) node = node.previousSibling();
+        return node;
+    }
+
+    private static Node nextNonBlank(Node node) {
+        while (isBlankText(node)) node = node.nextSibling();
+        return node;
+    }
+
+    private static boolean isBlankText(Node node) {
+        return node instanceof TextNode && ((TextNode) node).isBlank();
     }
 
     /**
