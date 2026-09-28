@@ -701,4 +701,108 @@ public class CleanerTest {
         String input = "<style></t</style><img>";
         assertEquals("<style></t</style>", Jsoup.clean(input, policy));
     }
+
+    // Cleaning must not invent whitespace or characters, and cleaning its own output again must be a fixed point.
+
+    @Test void cleanIsIdempotentWithTextBetweenBlocks() {
+        // inline text directly between block siblings is pretty-printed with a separating newline; a second clean
+        // must not turn that newline into a leading space
+        Safelist safelist = Safelist.none().addTags("p", "b");
+        String html = "<p>One</p>Two <b>three</b><p>Four</p>";
+
+        String clean1 = Jsoup.clean(html, safelist);
+        assertEquals("<p>One</p>\nTwo <b>three</b>\n<p>Four</p>", clean1);
+
+        String clean2 = Jsoup.clean(clean1, safelist);
+        assertEquals(clean1, clean2);
+        assertEquals(clean2, Jsoup.clean(clean2, safelist));
+    }
+
+    @Test void cleanIsIdempotentAfterHoistingRejectedWrapper() {
+        // the rejected wrapper is removed and its safe children hoisted; the trailing loose text must stay stable
+        Safelist safelist = Safelist.none().addTags("p");
+        String html = "<p>a</p><font>x</font> <p>b</p>";
+
+        String clean1 = Jsoup.clean(html, safelist);
+        String clean2 = Jsoup.clean(clean1, safelist);
+        assertEquals(clean1, clean2);
+        assertFalse(clean2.contains("\n x"), "no leading space may be introduced in front of hoisted text");
+    }
+
+    @Test void rejectedWrapperHoistsSafeSubtreeInOrder() {
+        Safelist safelist = Safelist.none().addTags("p", "b");
+        assertEquals("foo <b>bar</b> baz", Jsoup.clean("<font>foo <b>bar</b> baz</font>", safelist));
+        assertEquals("<b>x</b>", Jsoup.clean("<font><center><b>x</b></center></font>", safelist));
+        assertEquals("<p>safe</p>", Jsoup.clean("<custom><p>safe</p></custom>", safelist));
+    }
+
+    @Test void safeTextKeptWhenWrappedInDanger() {
+        // script contents/events never become executable markup, but safe siblings/text are retained with clear bounds
+        Safelist safelist = Safelist.none().addTags("p");
+        assertEquals("<p>a</p>\n<p>b</p>", Jsoup.clean("<p>a</p><script>alert(1)</script><p>b</p>", safelist));
+        String events = Jsoup.clean("<p onclick='alert(1)'>text</p>", safelist);
+        assertEquals("<p>text</p>", events);
+        assertFalse(events.toLowerCase().contains("onclick"));
+    }
+
+    @Test void preservesWhitespaceAndLiteralsInPreAndTextarea() {
+        Safelist safelist = Safelist.none().addTags("pre", "textarea", "code");
+        String pre = Jsoup.clean("<pre>  a\n\tb &lt; c  &amp;amp;</pre>", safelist);
+        assertEquals("<pre>  a\n\tb &lt; c  &amp;amp;</pre>", pre);
+        assertEquals(pre, Jsoup.clean(pre, safelist));
+
+        String textarea = Jsoup.clean("<textarea>a &amp; b\n  c&lt;d</textarea>", safelist);
+        assertEquals("<textarea>a &amp; b\n  c&lt;d</textarea>", textarea);
+        assertEquals(textarea, Jsoup.clean(textarea, safelist));
+    }
+
+    @Test void entitiesAreDecodedOnlyOnce() {
+        Safelist safelist = Safelist.none().addTags("p");
+        String once = Jsoup.clean("<p>&amp;amp; &lt;img src=x&gt;</p>", safelist);
+        assertEquals("<p>&amp;amp; &lt;img src=x&gt;</p>", once);
+        assertEquals(once, Jsoup.clean(once, safelist));
+    }
+
+    @Test void emptyRejectedAndMalformedInputsAreStable() {
+        Safelist safelist = Safelist.none().addTags("p");
+        String[] inputs = {"", "   ", "<script>x</script><style>y</style>", "</div></tr><<<>>><p>x", "\0\0\0"};
+        for (String input : inputs) {
+            String clean1 = Jsoup.clean(input, safelist);
+            String clean2 = Jsoup.clean(clean1, safelist);
+            assertEquals(clean1, clean2, "re-clean must be stable for input: " + input);
+        }
+        assertEquals("", Jsoup.clean("", safelist));
+        assertEquals("", Jsoup.clean("<script>x</script>", safelist));
+    }
+
+    @Test void recleanedOutputReparsesToSameStructure() {
+        Safelist safelist = Safelist.none()
+            .addTags("p", "b", "i", "h1", "table", "tbody", "tr", "td", "div");
+        String html = "<h1>H</h1>text<table><tr><td>x</table>end<div><p>a</p>tail</div>";
+
+        String clean1 = Jsoup.clean(html, safelist);
+        String clean2 = Jsoup.clean(clean1, safelist);
+        assertEquals(clean1, clean2);
+
+        Document d1 = Jsoup.parseBodyFragment(clean1);
+        Document d2 = Jsoup.parseBodyFragment(clean2);
+        for (String css : new String[]{"h1", "table", "tbody", "tr", "td", "p", "div"}) {
+            assertEquals(d1.select(css).size(), d2.select(css).size(), "selector count for " + css);
+            assertEquals(d1.select(css).outerHtml(), d2.select(css).outerHtml(), "selector html for " + css);
+        }
+        assertEquals(d1.text(), d2.text());
+    }
+
+    @Test void cleanDoesNotModifyCallerDocumentOrSafelistAcrossCalls() {
+        Safelist safelist = Safelist.none().addTags("p", "b");
+        Document dirty = Jsoup.parseBodyFragment("<p onclick='x()'>a <b>b</b></p><font>c</font>");
+        String original = dirty.body().html();
+        Cleaner cleaner = new Cleaner(safelist);
+
+        String c1 = cleaner.clean(dirty).body().html();
+        String c2 = cleaner.clean(dirty).body().html();
+        assertEquals(c1, c2);
+        assertEquals(original, dirty.body().html()); // source document untouched
+        assertEquals("<p>a <b>b</b></p>c", TextUtil.stripNewlines(c1));
+    }
 }

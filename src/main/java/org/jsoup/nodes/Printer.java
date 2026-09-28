@@ -121,8 +121,12 @@ class Printer implements NodeVisitor {
 
             // if previous is not an inline element
             if (!(prev instanceof Element && !isBlockEl(prev))) {
-                // if there is no previous sib; or not a text node and should be indented
-                if (prev == null || !(prev instanceof TextNode) && shouldIndent(prev))
+                // if there is no previous sib; or not a text node and should be indented. The previous sibling is
+                // judged on its own layout, so the traversal root exemption does not apply: when serializing an
+                // element's inner HTML that root is just the first of several siblings being printed, and treating
+                // it specially would leave a leading newline on following text untrimmed, which would re-parse as
+                // an extra space and make the output non-idempotent.
+                if (prev == null || !(prev instanceof TextNode) && shouldIndent(prev, false))
                     options |= Entities.TrimLeading;
             }
 
@@ -137,8 +141,12 @@ class Printer implements NodeVisitor {
             return options;
         }
 
-        boolean shouldIndent(@Nullable Node node) {
-            if (node == null || node == root || preserveWhitespace || isBlankText(node))
+        final boolean shouldIndent(@Nullable Node node) {
+            return shouldIndent(node, true);
+        }
+
+        boolean shouldIndent(@Nullable Node node, boolean honorRoot) {
+            if (node == null || honorRoot && node == root || preserveWhitespace || isBlankText(node))
                 return false;
             if (isBlockEl(node))
                 return true;
@@ -222,8 +230,8 @@ class Printer implements NodeVisitor {
         }
 
         @Override
-        boolean shouldIndent(@Nullable Node node) {
-            if (node == null || node == root || preserveWhitespace || isBlankText(node))
+        boolean shouldIndent(@Nullable Node node, boolean honorRoot) {
+            if (node == null || honorRoot && node == root || preserveWhitespace || isBlankText(node))
                 return false;
             if (node instanceof TextNode) {
                 return node.previousSibling() != null || node.nextSibling() != null;

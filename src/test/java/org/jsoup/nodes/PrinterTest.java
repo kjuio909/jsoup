@@ -90,4 +90,32 @@ public class PrinterTest {
         assertEquals("<div>\n <span>Span</span> Text <span>Follow</span>\n</div>\n<p><span>Span</span> Text <span>Follow</span></p>", body.html());
     }
 
+    @Test void textBetweenBlocksIsStableOnReparse() {
+        // text nodes that sit directly in a block container between block siblings must not gain a leading space
+        // when the serialized HTML is parsed and serialized again (the traversal root is the first sibling printed,
+        // and that exemption must not leak into the preceding-sibling check used to trim leading whitespace)
+        String[] inputs = {
+            "<p>One</p>Two <b>three</b><p>Four</p>",
+            "<p>One</p>\nTwo <b>three</b><p>Four</p>",
+            "<p>a</p>x",
+            "<div><p>a</p>tail</div>",
+            "<h1>H</h1>text<table><tr><td>x</table>end",
+        };
+        for (String input : inputs) {
+            String first = Jsoup.parseBodyFragment(input).body().html();
+            String second = Jsoup.parseBodyFragment(first).body().html();
+            assertEquals(first, second, "serialized inner HTML must be stable on reparse for: " + input);
+        }
+    }
+
+    @Test void textBetweenBlocksHasNoInjectedLeadingSpace() {
+        // the canonical serialization separates the blocks with a newline, but no space; re-parsing must not add one
+        Document doc = Jsoup.parseBodyFragment("<p>One</p>Two <b>three</b><p>Four</p>");
+        String html = doc.body().html();
+        assertEquals("<p>One</p>\nTwo <b>three</b>\n<p>Four</p>", html);
+        assertEquals(html, Jsoup.parseBodyFragment(html).body().html());
+        // the stray text and the inline content are still separated from the blocks but gain no space
+        assertFalse(html.contains("\n Two"), "no space may be inserted before the block-adjacent text");
+    }
+
 }
