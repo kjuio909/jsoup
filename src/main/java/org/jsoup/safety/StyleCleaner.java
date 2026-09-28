@@ -12,9 +12,13 @@ import java.util.Arrays;
  ({@code font-family: 'Calibri;'}) or functions ({@code background: url(/img;a.png)}) cannot break out of its
  declaration.
 
- <p>Declarations with no recognizable property, an unclosed comment, an unclosed function or string (recovered only at
- a newline, per the CSS bad-string rule), unbalanced parentheses, or a forbidden or unverifiable external reference
- are dropped individually; surrounding safe declarations, other attributes, and the element's text are untouched.
+ <p>Declarations with no recognizable property, an unclosed function or string (recovered only at a newline, per the
+ CSS bad-string rule), unbalanced parentheses, or a forbidden or unverifiable external reference are dropped
+ individually; surrounding safe declarations, other attributes, and the element's text are untouched. An unclosed
+ comment is itself an unbounded fragment and is dropped, but scanning recovers at the next semicolon so that later
+ declarations are still parsed independently. Comment text is emitted verbatim, so every comment — including one in a
+ leading, name-to-colon, or function-name separator position — is scanned for a concealed reference; a rejected URL
+ can never survive inside a comment.
  Each surviving declaration is scanned for references ({@code url(...)}, the legacy {@code expression(...)}
  function, and an {@code @import} at-rule) and every reference found is normalized through CSS unescaping and checked
  against the safelist's URL rules. Repeated separators and other degenerate input never throw and never cause
@@ -69,10 +73,19 @@ final class StyleCleaner {
             }
             if (c == '/' && i + 1 < length && value.charAt(i + 1) == '*') {
                 int close = value.indexOf("*/", i + 2);
-                if (close < 0) { // an unterminated comment swallows the tail, which is never parsed as CSS
-                    appendSafeDeclaration(value, segStart, i, segmentBad || parenDepth != 0, out);
-                    segStart = length;
-                    break;
+                if (close < 0) {
+                    // an unterminated comment cannot be bounded and so invalidates only its own fragment: recover at
+                    // the next ';' so that following declarations stay independently parseable. When no ';' remains,
+                    // the text before the comment is still validated on its own merits.
+                    int semi = value.indexOf(';', i + 2);
+                    if (semi < 0) {
+                        appendSafeDeclaration(value, segStart, i, segmentBad || parenDepth != 0, out);
+                        segStart = length;
+                        break;
+                    }
+                    segmentBad = true;
+                    i = semi; // the ';' branch ends the malformed fragment and resets for the next declaration
+                    continue;
                 }
                 i = close + 2;
                 continue;
@@ -128,7 +141,16 @@ final class StyleCleaner {
             }
             if (c == '/' && i + 1 < length && value.charAt(i + 1) == '*') {
                 int close = value.indexOf("*/", i + 2);
-                if (close < 0) break;
+                if (close < 0) {
+                    // mirror the declaration walk: an unterminated comment invalidates only its own fragment, and
+                    // scanning recovers at the next ';'. Any parentheses opened in that dropped fragment are
+                    // abandoned there, so the nesting depth resets with it.
+                    int semi = value.indexOf(';', i + 2);
+                    if (semi < 0) break;
+                    depth = 0;
+                    i = semi;
+                    continue;
+                }
                 i = close + 2;
                 continue;
             }
@@ -175,6 +197,7 @@ final class StyleCleaner {
     private void appendSafeDeclaration(String value, int start, int end, boolean structurallyBad, StringBuilder out) {
         if (structurallyBad) return;
         int p = skipSpaceAndComments(value, start, end);
+        if (p < 0) return; // an unterminated or unsafe leading comment rejects only this declaration
         int q = end;
         while (q > p && isCssSpace(value.charAt(q - 1))) q--;
         if (p == q) return; // whitespace-only fragment, e.g. from a duplicated ';'
@@ -203,11 +226,12 @@ final class StyleCleaner {
             if (p >= q || !isIdentStart(value.charAt(p))) return; // no property name
             do { p++; } while (p < q && isIdentChar(value.charAt(p)));
         }
-        p = skipSpaceAndComments(value, p, q); // whitespace/comments may sit between the name and the ':'
-        if (p >= q || value.charAt(p) != ':') return; // no ':' (empty fragment, junk, duplicate ';')
-        p++; // step past ':'
+        int afterName = skipSpaceAndComments(value, p, q); // whitespace/comments may sit between the name and the ':'
+        if (afterName < 0) return; // an unterminated or unsafe comment in the gap rejects only this declaration
+        if (afterName >= q || value.charAt(afterName) != ':') return; // no ':' (empty fragment, junk, duplicate ';')
+        p = afterName + 1; // step past ':'
 
-        if (isDangerousProperty(value, nameStart, p - 1)) return; // known script-entry properties, regardless of value
+        if (isDangerousProperty(value, nameStart)) return; // known script-entry properties, regardless of value
         // a custom property (--name) holds arbitrary free text: its value is scanned as one string, so a colon that is
         // not part of a reference (e.g. "--x: https://example.com" or a time such as "12:00"), a stray quote, or an
         // at-keyword other than @import is preserved verbatim; only its references decide its fate
@@ -243,7 +267,7 @@ final class StyleCleaner {
             afterRef = quote[0] + 1;
         } else if (matchesName(value, i, end, "url")) {
             int k = skipSeparators(value, i + 3, end);
-            if (k >= end || value.charAt(k) != '(') return false;
+            if (k < 0 || k >= end || value.charAt(k) != '(') return false;
             int argEnd = matchingParen(value, k + 1, end);
             if (argEnd < 0 || !isSafeUrlArgument(value, k + 1, argEnd)) return false;
             afterRef = argEnd + 1;
@@ -253,14 +277,20 @@ final class StyleCleaner {
         return referencesAreSafe(value, afterRef, end);
     }
 
-    /** Advances past CSS whitespace and complete block comments; an unterminated comment runs to {@code end}. */
+    /**
+     Advances past CSS whitespace and complete block comments, scanning every skipped comment body for a concealed
+     reference: the comment text is emitted verbatim, so a rejected URL in a leading comment, a name-to-colon gap, or
+     a function-name separator must not escape the URL rules. Returns {@code -1} when a comment is unterminated or
+     carries an unsafe reference.
+     */
     private int skipSpaceAndComments(String value, int i, int end) {
         while (i < end) {
             char c = value.charAt(i);
             if (isCssSpace(c)) { i++; continue; }
             if (c == '/' && i + 1 < end && value.charAt(i + 1) == '*') {
                 int close = value.indexOf("*/", i + 2);
-                if (close < 0) return end;
+                if (close < 0 || close >= end) return -1;
+                if (!freeTextIsSafe(value.substring(i + 2, close))) return -1;
                 i = close + 2;
                 continue;
             }
@@ -269,21 +299,53 @@ final class StyleCleaner {
         return i;
     }
 
-    /** Whitespace and comments may separate a function name from its opening parenthesis ({@code url/**\/( ... )}). */
+    /** Whitespace and comments may separate a function name from its opening parenthesis ({@code url /**\/ ( ... )}). */
     private int skipSeparators(String value, int i, int end) {
         return skipSpaceAndComments(value, i, end);
     }
 
     /**
-     Denies the legacy script-entry properties that load executable or behavior-bound content even through an
-     * otherwise allowed-looking {@code url(...)}: {@code -moz-binding} (XBL) and IE's {@code behavior}.
+     Tests whether the gap {@code [nameEnd, sepEnd)} just skipped is made up solely of block comments with no
+     * whitespace and glues the preceding name to another identifier run that is itself followed (optionally via
+     * separators) by {@code (}. A comment wedged between two identifier runs ({@code ur/**\/l( ... )} or
+     * {@code expr/**\/ession( ... )}) does not join them under a strict CSS tokenizer, but a lenient engine could
+     * read the glued run as a single function token; such a declaration is rejected rather than risk a split
+     * {@code url} or {@code expression} escaping recognition. Two bare runs without a following call
+     * ({@code a/**\/b}) stay untouched.
      */
-    private boolean isDangerousProperty(String value, int from, int colon) {
-        int p = from;
-        while (p < colon && isCssSpace(value.charAt(p))) p++;
-        int q = colon;
-        while (q > p && isCssSpace(value.charAt(q - 1))) q--;
-        String name = value.substring(p, q);
+    private boolean commentGluesNameToIdent(String value, int nameEnd, int sepEnd, int end) {
+        if (sepEnd >= end || !isIdentChar(value.charAt(sepEnd))) return false;
+        int i = nameEnd;
+        boolean sawComment = false;
+        while (i < sepEnd) {
+            char c = value.charAt(i);
+            if (isCssSpace(c)) return false; // real whitespace keeps the two runs distinct tokens
+            if (c == '/' && i + 1 < sepEnd && value.charAt(i + 1) == '*') {
+                int close = value.indexOf("*/", i + 2);
+                if (close < 0 || close > sepEnd) return false;
+                sawComment = true;
+                i = close + 2;
+                continue;
+            }
+            return false;
+        }
+        if (!sawComment) return false;
+        int k = sepEnd;
+        while (k < end && isIdentChar(value.charAt(k))) k++; // the run the comment glued onto
+        k = skipSeparators(value, k, end);
+        return k >= 0 && k < end && value.charAt(k) == '(';
+    }
+
+    /**
+     Denies the legacy script-entry properties that load executable or behavior-bound content even through an
+     * otherwise allowed-looking {@code url(...)}: {@code -moz-binding} (XBL) and IE's {@code behavior}. The name is
+     * the plain identifier run starting at {@code nameStart}; a comment appended to the name cannot change the
+     * comparison.
+     */
+    private boolean isDangerousProperty(String value, int nameStart) {
+        int p = nameStart;
+        while (p < value.length() && isIdentChar(value.charAt(p))) p++;
+        String name = value.substring(nameStart, p);
         return name.equalsIgnoreCase("-moz-binding") || name.equalsIgnoreCase("behavior");
     }
 
@@ -331,6 +393,8 @@ final class StyleCleaner {
                 int nameEnd = name[0];
                 String fnName = name[1] == 1 ? unescape(value.substring(i, nameEnd)) : value.substring(i, nameEnd);
                 int j = skipSeparators(value, nameEnd, end);
+                if (j < 0) return false; // an unterminated or unsafe comment after the name rejects the declaration
+                if (commentGluesNameToIdent(value, nameEnd, j, end)) return false; // e.g. ur/**/l(...)
                 if (j < end && value.charAt(j) == '(') {
                     int argEnd = matchingParen(value, j + 1, end);
                     if (argEnd < 0) return false;
@@ -406,6 +470,8 @@ final class StyleCleaner {
             if (isIdentStart(c) || c == '-') {
                 int[] name = readName(text, i, end);
                 int j = skipSeparators(text, name[0], end);
+                if (j < 0) return false;
+                if (commentGluesNameToIdent(text, name[0], j, end)) return false; // e.g. ur/**/l(...)
                 if (j < end && text.charAt(j) == '(') {
                     String fnName = name[1] == 1 ? unescape(text.substring(i, name[0])) : text.substring(i, name[0]);
                     int argEnd = matchingParen(text, j + 1, end);
@@ -437,7 +503,7 @@ final class StyleCleaner {
         }
         if (matchesName(text, i, end, "url")) {
             int k = skipSeparators(text, i + 3, end);
-            if (k >= end || text.charAt(k) != '(') return false;
+            if (k < 0 || k >= end || text.charAt(k) != '(') return false;
             int argEnd = matchingParen(text, k + 1, end);
             return argEnd >= 0 && isSafeUrlArgument(text, k + 1, argEnd);
         }
@@ -486,6 +552,12 @@ final class StyleCleaner {
                 int[] quote = scanQuoted(value, i + 1, c);
                 if (quote[1] != 1) return -1;
                 i = quote[0] + 1;
+                continue;
+            }
+            if (c == '/' && i + 1 < end && value.charAt(i + 1) == '*') {
+                int close = value.indexOf("*/", i + 2);
+                if (close < 0 || close >= end) return -1; // an unterminated comment leaves the function unclosed
+                i = close + 2;
                 continue;
             }
             if (c == '(') depth++;

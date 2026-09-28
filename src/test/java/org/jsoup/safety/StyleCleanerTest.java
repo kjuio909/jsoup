@@ -159,9 +159,70 @@ public class StyleCleanerTest {
             clean("<div style=\"color:red);color:blue\">x</div>")); // stray close parenthesis
     }
 
-    @Test void unterminatedCommentSwallowsOnlyItsTail() {
+    @Test void unterminatedCommentDropsOnlyItsFragmentAndRecoversAtSemicolon() {
+        // with a later ';', the unbounded comment is only its own fragment; following declarations survive
+        assertEquals("<div style=\"color:red;color:blue\">x</div>",
+            clean("<div style=\"color:red;/* never closed;color:blue\">x</div>"));
+        assertEquals("<div style=\"color:red;color:blue;margin:0\">x</div>",
+            clean("<div style=\"color:red;/* never closed;color:blue;margin:0\">x</div>"));
+        // a dangerous URL trapped in the unclosed fragment goes with it, and the next declaration still parses
+        assertEquals("<div style=\"color:red;color:blue\">x</div>",
+            clean("<div style=\"color:red;/* url(javascript:1);color:blue\">x</div>"));
+        // with no ';' left there is no recoverable boundary, so the tail is discarded
         assertEquals("<div style=\"color:red\">x</div>",
             clean("<div style=\"color:red;/* never closed color:blue\">x</div>"));
+    }
+
+    @Test void dangerousUrlInALeadingOrNameGapCommentRejectsOnlyItsDeclaration() {
+        // a comment before the property name is emitted verbatim, so its references are still checked
+        assertEquals("<div>x</div>",
+            clean("<div style=\"/* url(javascript:x) */background:red\">x</div>"));
+        assertEquals("<div style=\"color:blue\">x</div>",
+            clean("<div style=\"/* url(javascript:x) */background:red;color:blue\">x</div>"));
+        // and so is a comment sitting between the property name and the ':'
+        assertEquals("<div style=\"color:blue\">x</div>",
+            clean("<div style=\"color/* url(javascript:x) */:red;color:blue\">x</div>"));
+        // the same gap in a custom property is scanned like any free-text value
+        assertEquals("<div style=\"color:blue\">x</div>",
+            clean("<div style=\"--foo/* url(javascript:x) */:red;color:blue\">x</div>"));
+        // a safe comment in any of these positions is preserved verbatim
+        assertEquals("<div style=\"/* keep */color:red\">x</div>",
+            clean("<div style=\"/* keep */color:red\">x</div>"));
+        assertEquals("<div style=\"color/* keep */:red\">x</div>",
+            clean("<div style=\"color/* keep */:red\">x</div>"));
+    }
+
+    @Test void dangerousPropertiesAreNotMaskedByAnInsertedComment() {
+        assertEquals("<div>x</div>",
+            clean("<div style=\"behavior/**/:url(https://example.com/x.htc)\">x</div>"));
+        assertEquals("<div style=\"color:red\">x</div>",
+            clean("<div style=\"behavior /* */ : url(https://example.com/x.htc);color:red\">x</div>"));
+        assertEquals("<div>x</div>",
+            clean("<div style=\"-moz-binding/**/:url(https://example.com/b.xml)\">x</div>"));
+        assertEquals("<div style=\"color:red\">x</div>",
+            clean("<div style=\"-moz-binding /* */: url(https://example.com/b.xml);color:red\">x</div>"));
+    }
+
+    @Test void functionNameSplitByACommentIsRejected() {
+        // a comment cannot smuggle a split url(...) or expression(...) past name recognition
+        assertEquals("<div style=\"color:red\">x</div>",
+            clean("<div style=\"background:ur/**/l(javascript:1);color:red\">x</div>"));
+        assertEquals("<div style=\"color:red\">x</div>",
+            clean("<div style=\"background:ur/**/l(https://example.com/x.png);color:red\">x</div>"));
+        assertEquals("<div style=\"color:red\">x</div>",
+            clean("<div style=\"width:expr/**/ession(1);color:red\">x</div>"));
+        // two bare identifier runs glued by a comment but not followed by a call are still harmless and preserved
+        assertEquals("<div style=\"--x: a/**/b;color:red\">x</div>",
+            clean("<div style=\"--x: a/**/b;color:red\">x</div>"));
+    }
+
+    @Test void commentInsideAFunctionDoesNotEndTheFunctionEarly() {
+        // the ')' is comment text, not the function close; the real ')' balances calc() and the declaration survives
+        assertEquals("<div style=\"width:calc(1px /* ) */ + 1px);color:red\">x</div>",
+            clean("<div style=\"width:calc(1px /* ) */ + 1px);color:red\">x</div>"));
+        // a balanced, safe function followed by a comment stays intact
+        assertEquals("<div style=\"cursor:url(https://example.com/x.cur)/* x */,auto;color:red\">x</div>",
+            clean("<div style=\"cursor:url(https://example.com/x.cur)/* x */,auto;color:red\">x</div>"));
     }
 
     @Test void commentsAreNotParsedAsDeclarationsButTheirUrlsAreStillChecked() {
