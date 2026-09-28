@@ -162,8 +162,7 @@ public class Cleaner {
                 }
             } else if (source instanceof TextNode) {
                 TextNode sourceText = (TextNode) source;
-                TextNode destText = new TextNode(sourceText.getWholeText());
-                destination.appendChild(destText);
+                appendText(destination, sourceText.getWholeText());
             } else if (source instanceof DataNode && safelist.isSafeTag(source.parent().normalName())) {
                 DataNode sourceData = (DataNode) source;
                 DataNode destData = new DataNode(sourceData.getWholeData());
@@ -176,6 +175,22 @@ public class Cleaner {
         @Override public void tail(Node source, int depth) {
             if (source instanceof Element && safelist.isSafeTag(source.normalName())) {
                 destination = destination.parent(); // would have descended, so pop destination stack
+            }
+        }
+
+        /**
+         Appends source text to the destination. When the preceding source node was discarded (leaving this text
+         directly adjacent to an earlier text node in the output), the runs are joined into one text node. This
+         mirrors how the serialized output is re-parsed later -- adjacent text nodes are merged then -- and keeps
+         whitespace normalization from collapsing across the join differently on a second clean.
+         */
+        private void appendText(Element dest, String text) {
+            Node last = dest.lastChild();
+            if (last != null && last.getClass() == TextNode.class) {
+                TextNode lastText = (TextNode) last;
+                lastText.text(lastText.getWholeText() + text);
+            } else {
+                dest.appendChild(new TextNode(text));
             }
         }
     }
@@ -218,15 +233,21 @@ public class Cleaner {
         Attributes enforcedAttrs = safelist.getEnforcedAttributes(sourceTag);
         // special case for <a href rel=nofollow>, only apply to external links:
         if (sourceEl.nameIs("a") && enforcedAttrs.get("rel").equals("nofollow")) {
-            String href = sourceEl.absUrl("href");
-            if (!href.isEmpty()) {
-                try {
-                    URL baseUrl = new URL(sourceEl.baseUri());
-                    URL linkUrl = new URL(href);
-                    String baseHost = baseUrl.getHost();
-                    if (!baseHost.isEmpty() && baseHost.equalsIgnoreCase(linkUrl.getHost())) // same site, so don't set the nofollow
-                        enforcedAttrs.remove("rel");
-                } catch (MalformedURLException ignored) {}
+            // only a link whose href actually passed the safelist (and so is retained) can be same-site; a dropped or
+            // unsafe href must keep the enforced nofollow, otherwise cleaning the href-less output a second time
+            // would add it and break idempotency
+            Attribute hrefAttr = sourceEl.attribute("href");
+            if (hrefAttr != null && safelist.isSafeAttribute(sourceTag, sourceEl, hrefAttr)) {
+                String href = sourceEl.absUrl("href");
+                if (!href.isEmpty()) {
+                    try {
+                        URL baseUrl = new URL(sourceEl.baseUri());
+                        URL linkUrl = new URL(href);
+                        String baseHost = baseUrl.getHost();
+                        if (!baseHost.isEmpty() && baseHost.equalsIgnoreCase(linkUrl.getHost())) // same site, so don't set the nofollow
+                            enforcedAttrs.remove("rel");
+                    } catch (MalformedURLException ignored) {}
+                }
             }
         }
 

@@ -729,6 +729,27 @@ public class CleanerTest {
         assertFalse(clean2.contains("\n x"), "no leading space may be introduced in front of hoisted text");
     }
 
+    @Test void cleanIsIdempotentWhenWhitespaceFlanksRejectedNode() {
+        // the rejected node sat between two whitespace runs; after hoisting they must behave like one merged run
+        Safelist safelist = Safelist.none();
+        String html = "<p>x</p> \n <script>y</script> <p>z</p>";
+
+        String clean1 = Jsoup.clean(html, safelist);
+        String clean2 = Jsoup.clean(clean1, safelist);
+        assertEquals(clean1, clean2);
+        assertEquals("x z", clean2);
+    }
+
+    @Test void droppedUnsafeHrefStillGetsEnforcedNofollow() {
+        // a smuggled unsafe href is dropped, but the enforced rel=nofollow must still be applied and stay stable
+        Safelist safelist = Safelist.basic();
+        String html = "<a href='java%73cript:1'>x</a>";
+
+        String clean1 = Jsoup.clean(html, "https://example.com/a/b/", safelist);
+        assertEquals("<a rel=\"nofollow\">x</a>", clean1);
+        assertEquals(clean1, Jsoup.clean(clean1, "https://example.com/a/b/", safelist));
+    }
+
     @Test void rejectedWrapperHoistsSafeSubtreeInOrder() {
         Safelist safelist = Safelist.none().addTags("p", "b");
         assertEquals("foo <b>bar</b> baz", Jsoup.clean("<font>foo <b>bar</b> baz</font>", safelist));
@@ -754,6 +775,11 @@ public class CleanerTest {
         String textarea = Jsoup.clean("<textarea>a &amp; b\n  c&lt;d</textarea>", safelist);
         assertEquals("<textarea>a &amp; b\n  c&lt;d</textarea>", textarea);
         assertEquals(textarea, Jsoup.clean(textarea, safelist));
+
+        // code keeps consecutive spaces, tabs, and newlines like pre
+        String code = Jsoup.clean("<code>x = 1\n  y\tz  &lt;a&gt;</code>", safelist);
+        assertEquals("<code>x = 1\n  y\tz  &lt;a&gt;</code>", code);
+        assertEquals(code, Jsoup.clean(code, safelist));
     }
 
     @Test void entitiesAreDecodedOnlyOnce() {
