@@ -38,6 +38,11 @@ final class StyleCleaner {
         this.el = el;
     }
 
+    /** Builds a cleaner for the text of an allowed {@code <style>} element, resolved against that element's base URI. */
+    static StyleCleaner forStyleElement(Safelist safelist, Element el) {
+        return new StyleCleaner(safelist, "style", el);
+    }
+
     /**
      Cleans an inline {@code style} attribute value declaration by declaration, preserving the order and original
      text of every declaration that survives.
@@ -178,7 +183,7 @@ final class StyleCleaner {
      *       or after the opening quote (the malformed declaration is cut there), or the value length when none.</li>
      * </ul>
      */
-    private int[] scanQuoted(String value, int from, char quote) {
+    static int[] scanQuoted(String value, int from, char quote) {
         int length = value.length();
         int firstSemi = -1;
         for (int i = from; i < length; i++) {
@@ -253,7 +258,7 @@ final class StyleCleaner {
      * pass the URL rules, and any trailing layer/media/supports conditions must themselves contain no unsafe
      * reference.
      */
-    private boolean isSafeImportDeclaration(String value, int at, int end) {
+    boolean isSafeImportDeclaration(String value, int at, int end) {
         int i = at + 1;
         StringBuilder atName = new StringBuilder();
         i = scanIdent(value, i, end, atName);
@@ -696,7 +701,7 @@ final class StyleCleaner {
         return sb != null ? sb.toString() : value;
     }
 
-    private static boolean isCssSpace(char c) {
+    static boolean isCssSpace(char c) {
         return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f';
     }
 
