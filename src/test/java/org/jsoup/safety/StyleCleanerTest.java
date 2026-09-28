@@ -91,6 +91,119 @@ public class StyleCleanerTest {
         assertEquals("<div>x</div>", clean("<div style=\"background:url(javascript:alert(1))\">x</div>"));
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {
+        "url(javascript:1)",
+        "\\75 rl(javascript:1)", // hex escape with its whitespace delimiter
+        "\\75rl(javascript:1)", // hex escape glued to the rest of the name
+        "u\\72 l(javascript:1)",
+        "ur\\6c (javascript:1)",
+        "\\75\\72\\6c(javascript:1)", // every letter hex escaped, no delimiters
+        "\\000075 rl(javascript:1)", // six-digit hex run
+        "\\75\trl(javascript:1)", // a tab is a valid hex-escape delimiter
+        "\\75\nrl(javascript:1)", // a newline is a valid hex-escape delimiter (normalized CRLF by the parser)
+        "\\u\\r\\l(javascript:1)", // single-character escapes
+        "\\uRL(javascript:1)", // character escape plus an upper-case remainder
+        "\\55 RL(JAVASCRIPT:1)", // hex + case variant
+        "\\55\\52\\4c(javascript:1)", // URL fully hex escaped
+        "\\\\75rl(javascript:1)", // an escaped backslash glued into the run makes a name containing '\', rejected
+        "\\\\\\75 rl(javascript:1)", // escaped backslash followed by a real escaped "url" call is still one call
+        "var(--x, \\75 rl(javascript:1))", // nested inside another function's arguments
+        "calc(1px + \\75 rl(javascript:1))", // nested after operators
+    })
+    void rejectsEscapedUrlFunctionNames(String fn) {
+        String html = "<div style=\"background:" + fn + ";color:red\">x</div>";
+        assertEquals("<div style=\"color:red\">x</div>", clean(html), fn);
+        // and when it is the only declaration, the whole attribute goes
+        assertEquals("<div>x</div>", clean("<div style=\"background:" + fn + "\">x</div>"), fn);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {
+        "\\65 xpression(alert(1))",
+        "expr\\65 ssion(alert(1))",
+        "\\65\\78\\70\\72\\65\\73\\73\\69\\6f\\6e(alert(1))",
+        "\\65XPRESSION(alert(1))",
+        "var(--x, \\65 xpression(alert(1)))",
+    })
+    void rejectsEscapedExpressionFunctionNames(String fn) {
+        String html = "<div style=\"width:" + fn + ";color:red\">x</div>";
+        assertEquals("<div style=\"color:red\">x</div>", clean(html), fn);
+    }
+
+    @Test void escapedNameOfASafeReferenceHasTheSameOutcomeAsPlainSpelling() {
+        // an escaped url() whose reference passes the URL rules is kept verbatim, just like the plain spelling
+        assertEquals("<div style=\"background:\\75 rl(https://example.com/x.png);color:red\">x</div>",
+            clean("<div style=\"background:\\75 rl(https://example.com/x.png);color:red\">x</div>"));
+        assertEquals("<div style=\"background:u\\72 l(https://example.com/x.png);color:red\">x</div>",
+            clean("<div style=\"background:u\\72 l(https://example.com/x.png);color:red\">x</div>"));
+        assertEquals("<div style=\"background:\\55 RL(//cdn.example.com/x.png)\">x</div>",
+            clean("<div style=\"background:\\55 RL(//cdn.example.com/x.png)\">x</div>"));
+        // a safe relative reference still resolves against the element's document base
+        assertEquals("<div style=\"background:\\75 rl(img/x.png)\">x</div>",
+            clean("<div style=\"background:\\75 rl(img/x.png)\">x</div>"));
+        // and fails, just like plain url(), when there is no base to resolve against
+        assertEquals("<div style=\"color:red\">x</div>",
+            clean("<div style=\"background:\\75 rl(img/x.png);color:red\">x</div>", "", styleSafelist()));
+        // a hex escape inside the URL argument decodes the same way before the protocol check
+        assertEquals("<div style=\"background:url(\\68 ttps://example.com/x.png)\">x</div>",
+            clean("<div style=\"background:url(\\68 ttps://example.com/x.png)\">x</div>"));
+        assertEquals("<div>x</div>",
+            clean("<div style=\"background:url(\\6a avascript:1)\">x</div>"));
+    }
+
+    @Test void escapedImportKeywordIsRecognized() {
+        assertEquals("<div style=\"color:red\">x</div>",
+            clean("<div style=\"@\\69 mport 'javascript:1';color:red\">x</div>"));
+        assertEquals("<div>x</div>",
+            clean("<div style=\"@\\69 mport \\75 rl(javascript:1)\">x</div>"));
+        assertEquals("<div style=\"@\\69 mport 'https://example.com/x.css';color:red\">x</div>",
+            clean("<div style=\"@\\69 mport 'https://example.com/x.css';color:red\">x</div>"));
+    }
+
+    @Test void escapedNamesInCustomPropertyValuesAreChecked() {
+        assertEquals("<div style=\"color:red\">x</div>",
+            clean("<div style=\"--x: \\75 rl(javascript:1);color:red\">x</div>"));
+        assertEquals("<div style=\"color:red\">x</div>",
+            clean("<div style=\"--x: \\65 xpression(1);color:red\">x</div>"));
+        // a fake call fully inside an ordinary string is inert and stays verbatim
+        assertEquals("<div style=\"--x: 'url(javascript:1)';color:red\">x</div>",
+            clean("<div style=\"--x: 'url(javascript:1)';color:red\">x</div>"));
+    }
+
+    @Test void fakeReferencesInsideOrdinaryStringsDoNotTriggerUrlChecks() {
+        // a browser never tokenizes a function call out of a quoted string, so these are inert declarations
+        assertEquals("<div style=\"content:'url(javascript:1)'\">x</div>",
+            clean("<div style=\"content:'url(javascript:1)'\">x</div>"));
+        assertEquals("<div style=\"content:&quot;expression(1)&quot;\">x</div>",
+            clean("<div style='content:\"expression(1)\"'>x</div>"));
+        // a real url() call whose argument is quoted is still checked, in both outcomes
+        assertEquals("<div>x</div>", clean("<div style=\"background:url('javascript:1')\">x</div>"));
+        assertEquals("<div style=\"background:url(&quot;https://example.com/x.png&quot;)\">x</div>",
+            clean("<div style='background:url(\"https://example.com/x.png\")'>x</div>"));
+        // an identifier glued to a string and followed by a call is unparsable ambiguity and is rejected
+        assertEquals("<div>x</div>", clean("<div style=\"background:u&quot;rl&quot;(javascript:1)\">x</div>"));
+        assertEquals("<div>x</div>", clean("<div style='background:u\"rl\"(https://example.com/x.png)'>x</div>"));
+    }
+
+    @Test void hexEscapeDelimiterBoundaryIsUnambiguous() {
+        // two spaces: only the first is the hex-escape delimiter, the second is a real token separator, so "rl(...)"
+        // is an ordinary function name and the escaped "u" is a separate value token — no url() call exists
+        assertEquals("<div style=\"background:\\75  rl(https://example.com/x.png)\">x</div>",
+            clean("<div style=\"background:\\75  rl(https://example.com/x.png)\">x</div>"));
+        // the same split spelling carrying a script URL is equally inert
+        assertEquals("<div style=\"background:\\75  rl(javascript:1)\">x</div>",
+            clean("<div style=\"background:\\75  rl(javascript:1)\">x</div>"));
+    }
+
+    @Test void escapedSafeOutputIsStableAcrossRepeatedCleaning() {
+        String html = "<div style=\"background:\\75 rl(https://example.com/x.png);color:red;"
+            + "content:'url(javascript:1)';color:red/* url(javascript:1) */\">x</div>";
+        String once = clean(html);
+        assertEquals(once, clean(once));
+        assertTrue(Cleaner.isValid(once, styleSafelist()));
+    }
+
     @Test void allowsSafeHttpUrlsVerbatim() {
         String html = "<div style=\"background:url(https://example.com/x.png);color:red\">x</div>";
         assertEquals(html, clean(html));
@@ -173,23 +286,26 @@ public class StyleCleanerTest {
             clean("<div style=\"color:red;/* never closed color:blue\">x</div>"));
     }
 
-    @Test void dangerousUrlInALeadingOrNameGapCommentRejectsOnlyItsDeclaration() {
-        // a comment before the property name is emitted verbatim, so its references are still checked
-        assertEquals("<div>x</div>",
+    @Test void fakeReferenceInACommentNeverTriggersAUrlCheck() {
+        // comment text is removed by a browser before tokenization, so a url(...)-shaped fragment inside a comment
+        // is never fetched and must not by itself reject (or check) its declaration; the declaration keeps its text
+        assertEquals("<div style=\"/* url(javascript:x) */background:red\">x</div>",
             clean("<div style=\"/* url(javascript:x) */background:red\">x</div>"));
-        assertEquals("<div style=\"color:blue\">x</div>",
+        assertEquals("<div style=\"/* url(javascript:x) */background:red;color:blue\">x</div>",
             clean("<div style=\"/* url(javascript:x) */background:red;color:blue\">x</div>"));
-        // and so is a comment sitting between the property name and the ':'
-        assertEquals("<div style=\"color:blue\">x</div>",
+        // the same goes for a comment between the property name and the ':'
+        assertEquals("<div style=\"color/* url(javascript:x) */:red;color:blue\">x</div>",
             clean("<div style=\"color/* url(javascript:x) */:red;color:blue\">x</div>"));
-        // the same gap in a custom property is scanned like any free-text value
-        assertEquals("<div style=\"color:blue\">x</div>",
+        // and in a custom property, whose value is scanned as free text
+        assertEquals("<div style=\"--foo/* url(javascript:x) */:red;color:blue\">x</div>",
             clean("<div style=\"--foo/* url(javascript:x) */:red;color:blue\">x</div>"));
-        // a safe comment in any of these positions is preserved verbatim
-        assertEquals("<div style=\"/* keep */color:red\">x</div>",
-            clean("<div style=\"/* keep */color:red\">x</div>"));
-        assertEquals("<div style=\"color/* keep */:red\">x</div>",
-            clean("<div style=\"color/* keep */:red\">x</div>"));
+        // a genuinely named reference outside the comment is still checked, of course
+        assertEquals("<div>x</div>",
+            clean("<div style=\"/* keep */background:url(javascript:x)\">x</div>"));
+        // an unterminated comment is still an unbounded fragment: only its own fragment is lost, and later
+        // declarations stay independently parseable (recovery is at the next ';')
+        assertEquals("<div style=\"color:red;color:blue\">x</div>",
+            clean("<div style=\"/* url(javascript:x);color:red;color:blue\">x</div>"));
     }
 
     @Test void dangerousPropertiesAreNotMaskedByAnInsertedComment() {
@@ -225,14 +341,15 @@ public class StyleCleanerTest {
             clean("<div style=\"cursor:url(https://example.com/x.cur)/* x */,auto;color:red\">x</div>"));
     }
 
-    @Test void commentsAreNotParsedAsDeclarationsButTheirUrlsAreStillChecked() {
+    @Test void commentsAreNotParsedAsDeclarationsAndDoNotTriggerUrlChecks() {
         // a safe comment stays in place
         assertEquals("<div style=\"color:red/* a;b */;color:blue\">x</div>",
             clean("<div style=\"color:red/* a;b */;color:blue\">x</div>"));
-        // a dangerous URL hidden in a comment rejects the declaration that contains the comment
-        assertEquals("<div style=\"color:blue\">x</div>",
+        // a url(...)-shaped fragment inside a comment is removed by the browser before tokenization and so is never
+        // a reference: it neither checks nor rejects the declaration that carries it
+        assertEquals("<div style=\"color:red/* url(javascript:x) */;color:blue\">x</div>",
             clean("<div style=\"color:red/* url(javascript:x) */;color:blue\">x</div>"));
-        // comment text is never treated as a declaration; a safe leading comment is preserved verbatim
+        // comment text is never treated as a declaration; a leading comment is preserved verbatim
         assertEquals("<div style=\"/* color: red */color:blue\">x</div>",
             clean("<div style=\"/* color: red */color:blue\">x</div>"));
     }
@@ -381,9 +498,15 @@ public class StyleCleanerTest {
     }
 
     @Test void oversizedCssEscapeDoesNotThrow() {
-        // six hex digits above the Unicode range become U+FFFD; the declaration is still validated, never thrown on
-        assertEquals("<div style=\"color:red\">x</div>",
+        // six hex digits above the Unicode range become U+FFFD; the declaration is still validated, never thrown on.
+        // the delimiter space is part of the hex escape, so the token decodes to a harmless relative reference that
+        // resolves against the https base and is kept verbatim
+        assertEquals("<div style=\"background:url(http\\af0aab x);color:red\">x</div>",
             clean("<div style=\"background:url(http\\af0aab x);color:red\">x</div>"));
+        // the same overlong escape inside a function name decodes to U+FFFD, which is not a plain identifier, so the
+        // ambiguous call is rejected rather than read as two tokens
+        assertEquals("<div style=\"color:red\">x</div>",
+            clean("<div style=\"background:\\af0aab url(https://example.com/x.png);color:red\">x</div>"));
     }
 
     @Test void srcsetAndHrefBehaviorIsUnaffected() {

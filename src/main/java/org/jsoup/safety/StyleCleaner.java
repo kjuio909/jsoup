@@ -16,13 +16,14 @@ import java.util.Arrays;
  CSS bad-string rule), unbalanced parentheses, or a forbidden or unverifiable external reference are dropped
  individually; surrounding safe declarations, other attributes, and the element's text are untouched. An unclosed
  comment is itself an unbounded fragment and is dropped, but scanning recovers at the next semicolon so that later
- declarations are still parsed independently. Comment text is emitted verbatim, so every comment — including one in a
- leading, name-to-colon, or function-name separator position — is scanned for a concealed reference; a rejected URL
- can never survive inside a comment.
- Each surviving declaration is scanned for references ({@code url(...)}, the legacy {@code expression(...)}
- function, and an {@code @import} at-rule) and every reference found is normalized through CSS unescaping and checked
- against the safelist's URL rules. Repeated separators and other degenerate input never throw and never cause
- following declarations to be joined into a rejected value.</p>
+ declarations are still parsed independently. Comment text and the contents of ordinary quoted strings are emitted
+ verbatim but are inert as CSS — a browser removes comments and never tokenizes a function call out of a string — so
+ a {@code url(...)}-shaped fragment inside either does not by itself trigger a URL check (a quoted string is still
+ checked when it is the actual argument of a real {@code url()} call). Function names are read with full CSS escape
+ semantics (hex runs such as {@code \75 rl}, single-character escapes such as a backslash before the letter u, and consecutive
+ backslashes), so an escaped or differently cased {@code url}, {@code expression}, or equivalent reference is
+ normalized before the safelist's URL rules are applied. Repeated separators and other degenerate input never throw
+ and never cause following declarations to be joined into a rejected value.</p>
 
  <p>The cleaner is stateless and thread-safe; all per-value state lives on the local parse stack.</p>
  */
@@ -197,7 +198,7 @@ final class StyleCleaner {
     private void appendSafeDeclaration(String value, int start, int end, boolean structurallyBad, StringBuilder out) {
         if (structurallyBad) return;
         int p = skipSpaceAndComments(value, start, end);
-        if (p < 0) return; // an unterminated or unsafe leading comment rejects only this declaration
+        if (p < 0) return; // an unterminated leading comment rejects only this declaration
         int q = end;
         while (q > p && isCssSpace(value.charAt(q - 1))) q--;
         if (p == q) return; // whitespace-only fragment, e.g. from a duplicated ';'
@@ -254,10 +255,12 @@ final class StyleCleaner {
      */
     private boolean isSafeImportDeclaration(String value, int at, int end) {
         int i = at + 1;
-        if (!matchesName(value, i, end, "import")) return false;
-        i += 6;
-        while (i < end && isCssSpace(value.charAt(i))) i++;
-        if (i == end) return false;
+        StringBuilder atName = new StringBuilder();
+        i = scanIdent(value, i, end, atName);
+        if (!atName.toString().equalsIgnoreCase("import")) return false;
+        int sep = skipSeparators(value, i, end);
+        if (sep < 0 || sep >= end) return false;
+        i = sep;
         int afterRef;
         char c = value.charAt(i);
         if (c == '"' || c == '\'') {
@@ -265,9 +268,11 @@ final class StyleCleaner {
             if (quote[1] != 1) return false;
             if (!safelist.isSafeStyleUrl(tagName, el, unescape(value.substring(i + 1, quote[0])))) return false;
             afterRef = quote[0] + 1;
-        } else if (matchesName(value, i, end, "url")) {
-            int k = skipSeparators(value, i + 3, end);
-            if (k < 0 || k >= end || value.charAt(k) != '(') return false;
+        } else if (isIdentStart(c) || c == '-' || c == '\\') {
+            StringBuilder fnName = new StringBuilder();
+            int nameEnd = scanIdent(value, i, end, fnName);
+            int k = skipSeparators(value, nameEnd, end);
+            if (k < 0 || k >= end || value.charAt(k) != '(' || !fnName.toString().equalsIgnoreCase("url")) return false;
             int argEnd = matchingParen(value, k + 1, end);
             if (argEnd < 0 || !isSafeUrlArgument(value, k + 1, argEnd)) return false;
             afterRef = argEnd + 1;
@@ -278,10 +283,9 @@ final class StyleCleaner {
     }
 
     /**
-     Advances past CSS whitespace and complete block comments, scanning every skipped comment body for a concealed
-     reference: the comment text is emitted verbatim, so a rejected URL in a leading comment, a name-to-colon gap, or
-     a function-name separator must not escape the URL rules. Returns {@code -1} when a comment is unterminated or
-     carries an unsafe reference.
+     Advances past CSS whitespace and complete block comments. A comment is inert token separators (a browser removes
+     it before tokenization), so its text is never inspected for a concealed reference; an unterminated comment is
+     still an unbounded fragment and yields {@code -1}, rejecting only the declaration that contains it.
      */
     private int skipSpaceAndComments(String value, int i, int end) {
         while (i < end) {
@@ -290,7 +294,6 @@ final class StyleCleaner {
             if (c == '/' && i + 1 < end && value.charAt(i + 1) == '*') {
                 int close = value.indexOf("*/", i + 2);
                 if (close < 0 || close >= end) return -1;
-                if (!freeTextIsSafe(value.substring(i + 2, close))) return -1;
                 i = close + 2;
                 continue;
             }
@@ -305,33 +308,35 @@ final class StyleCleaner {
     }
 
     /**
-     Tests whether the gap {@code [nameEnd, sepEnd)} just skipped is made up solely of block comments with no
-     * whitespace and glues the preceding name to another identifier run that is itself followed (optionally via
-     * separators) by {@code (}. A comment wedged between two identifier runs ({@code ur/**\/l( ... )} or
-     * {@code expr/**\/ession( ... )}) does not join them under a strict CSS tokenizer, but a lenient engine could
-     * read the glued run as a single function token; such a declaration is rejected rather than risk a split
-     * {@code url} or {@code expression} escaping recognition. Two bare runs without a following call
-     * ({@code a/**\/b}) stay untouched.
+     Tests whether a comment-only separator (no whitespace) from {@code nameEnd} glues the preceding identifier run
+     to another identifier run that is itself followed (optionally via separators) by {@code (}. A comment wedged
+     between two identifier runs ({@code ur/**\/l( ... )} or {@code expr/**\/ession( ... )}) does not join them under
+     a strict CSS tokenizer, but a lenient engine could read the glued run as a single function token; such a
+     declaration is rejected rather than risk a split {@code url} or {@code expression} escaping recognition. Real
+     whitespace keeps the runs distinct tokens, and two bare runs without a following call ({@code a/**\/b}) stay
+     untouched. The second run is read with full escape semantics so that an escaped continuation such as
+     {@code ur/**\/\6c( ... )} is just as ambiguous.
      */
-    private boolean commentGluesNameToIdent(String value, int nameEnd, int sepEnd, int end) {
-        if (sepEnd >= end || !isIdentChar(value.charAt(sepEnd))) return false;
+    private boolean commentGluesIdentToCall(String value, int nameEnd, int end) {
         int i = nameEnd;
         boolean sawComment = false;
-        while (i < sepEnd) {
+        while (i < end) {
             char c = value.charAt(i);
             if (isCssSpace(c)) return false; // real whitespace keeps the two runs distinct tokens
-            if (c == '/' && i + 1 < sepEnd && value.charAt(i + 1) == '*') {
+            if (c == '/' && i + 1 < end && value.charAt(i + 1) == '*') {
                 int close = value.indexOf("*/", i + 2);
-                if (close < 0 || close > sepEnd) return false;
+                if (close < 0 || close > end) return false;
                 sawComment = true;
                 i = close + 2;
                 continue;
             }
-            return false;
+            break; // reached the start of whatever the separator abuts
         }
         if (!sawComment) return false;
-        int k = sepEnd;
-        while (k < end && isIdentChar(value.charAt(k))) k++; // the run the comment glued onto
+        if (i >= end || !(isIdentStart(value.charAt(i)) || value.charAt(i) == '\\'))
+            return false; // the separator must glue onto another identifier run
+        StringBuilder glued = new StringBuilder();
+        int k = scanIdent(value, i, end, glued);
         k = skipSeparators(value, k, end);
         return k >= 0 && k < end && value.charAt(k) == '(';
     }
@@ -351,33 +356,35 @@ final class StyleCleaner {
 
     /**
      Walks a declaration value in a single lexical pass: strings, comments, escapes, and balanced functions are
-     recognized exactly as in declaration splitting. Block comments are skipped entirely (their text is never parsed
-     as CSS); string contents are still scanned for a concealed {@code url(...)}-shaped reference, because when the
-     string is itself the argument of {@code url()} the browser unescapes it before fetching; every {@code url(...)}
-     argument, an {@code @import} reference, and the legacy {@code expression(...)} function is normalized and checked
-     against the safelist. Unbalanced parentheses, an unterminated string or comment, or any failed reference check
-     rejects the declaration.
+     recognized exactly as in declaration splitting. Block comments and the contents of ordinary quoted strings are
+     inert token separators (their text is emitted verbatim but never fetched or tokenized as a call); a quoted
+     string is still checked when it is the actual argument of a {@code url()} call. Every {@code url(...)}
+     argument, an {@code @import} reference, and the legacy {@code expression(...)} function is read with full CSS
+     escape semantics, so a hex or character escape, consecutive backslashes, or a case change in the function name
+     ({@code \75 rl(...)}, a backslash-escaped {@code URL}, {@code \65 xpression(...)}) reaches the same decision as the plain
+     spelling. Unbalanced parentheses, an unterminated string or comment, or any failed reference check rejects the
+     declaration.
      */
     private boolean referencesAreSafe(String value, int start, int end) {
         int parenDepth = 0;
         int i = start;
         while (i < end) {
             char c = value.charAt(i);
-            if (c == '\\') { i += 2; continue; }
             if (c == '"' || c == '\'') {
                 int[] quote = scanQuoted(value, i + 1, c);
                 if (quote[1] != 1) return false; // no bad-string recovery inside a value being checked
-                if (!freeTextIsSafe(value.substring(i + 1, quote[0]))) return false;
+                // an identifier run glued directly to the string and followed by a call (e.g. u"rl"(...)) is a
+                // syntax error a strict browser discards but a lenient one could read as one escaped function name
+                if (stringGluesIdentToCall(value, i, quote[0], end)) return false;
+                // ordinary string content is inert: it is never fetched as a reference (a quoted url() argument is
+                // checked separately by isSafeUrlArgument)
                 i = quote[0] + 1;
                 continue;
             }
             if (c == '/' && i + 1 < end && value.charAt(i + 1) == '*') {
                 int close = value.indexOf("*/", i + 2);
                 if (close < 0 || close >= end) return false; // unterminated comment within the declaration
-                // comment text is never a declaration, but a reference concealed in a comment must still pass the
-                // same URL rules so that a rejected URL can never survive in the emitted attribute
-                if (!freeTextIsSafe(value.substring(i + 2, close))) return false;
-                i = close + 2;
+                i = close + 2; // comment text is inert token separators, never a concealed declaration or call
                 continue;
             }
             if (c == '(') { parenDepth++; i++; continue; }
@@ -388,13 +395,13 @@ final class StyleCleaner {
                 continue;
             }
             if (c == '@') return false; // no at-rule (e.g. a buried @import) is valid inside a declaration value
-            if (isIdentStart(c) || c == '-') {
-                int[] name = readName(value, i, end);
-                int nameEnd = name[0];
-                String fnName = name[1] == 1 ? unescape(value.substring(i, nameEnd)) : value.substring(i, nameEnd);
+            if (isIdentStart(c) || c == '-' || c == '\\') {
+                StringBuilder decoded = new StringBuilder();
+                int nameEnd = scanIdent(value, i, end, decoded);
+                String fnName = decoded.toString();
                 int j = skipSeparators(value, nameEnd, end);
-                if (j < 0) return false; // an unterminated or unsafe comment after the name rejects the declaration
-                if (commentGluesNameToIdent(value, nameEnd, j, end)) return false; // e.g. ur/**/l(...)
+                if (j < 0) return false; // an unterminated comment after the name rejects the declaration
+                if (commentGluesIdentToCall(value, nameEnd, end)) return false; // e.g. ur/**/l(...)
                 if (j < end && value.charAt(j) == '(') {
                     int argEnd = matchingParen(value, j + 1, end);
                     if (argEnd < 0) return false;
@@ -428,52 +435,98 @@ final class StyleCleaner {
     }
 
     /**
-     Reads a CSS name token (identifier characters, plus backslash escapes) from {@code from}. Returns
-     {@code [end, escaped]}: {@code end} is the index after the token, and {@code escaped} is 1 when it contained a
-     backslash. A leading run of dashes is consumed so that e.g. {@code -moz-binding} reads as one token.
+     Reads a CSS identifier token starting at {@code from} with full escape semantics: plain identifier characters
+     (including a leading run of dashes), single-character escapes (a backslash before any character such as u or '(', or a doubled
+     {@code \\}), and hex escapes ({@code \75}, up to six hex digits) together with the single whitespace
+     delimiter that may follow one ({@code \75 rl} is therefore one token, exactly as a browser reads it). The
+     decoded code points are appended to {@code decoded}, and the index just past the token is returned. The decoded
+     form is what a function name is compared against, so a hex-escaped, character-escaped, doubled-backslash, or
+     differently cased {@code url} or {@code expression} cannot hide from the reference checks.
      */
-    private int[] readName(String value, int from, int end) {
+    private int scanIdent(String value, int from, int end, StringBuilder decoded) {
         int i = from;
-        int escaped = 0;
         while (i < end) {
             char c = value.charAt(i);
             if (c == '\\') {
-                if (i + 1 >= end) break;
-                escaped = 1;
-                i += 2;
+                int[] escape = consumeEscape(value, i, end);
+                if (escape[1] >= 0) decoded.appendCodePoint(escape[1]);
+                i = escape[0];
                 continue;
             }
-            if (isIdentChar(c)) { i++; continue; }
+            if (isIdentChar(c)) { decoded.append(c); i++; continue; }
             break;
         }
-        return new int[] {i, escaped};
+        return i;
     }
 
     /**
-     Applies the same URL rules to text that is not itself parsed as declarations — the body of a quoted string, a
-     * block comment, or the value of a custom property. Such text cannot introduce a declaration, but a rejected
-     * reference must not survive in the emitted style, so every {@code url(...)}-shaped reference and every
-     * {@code @import} reference is extracted (CSS-escapes normalized) and checked; the legacy
-     * {@code expression(...)} function is always rejected.
+     Consumes one CSS escape sequence beginning at the backslash {@code i}. Returns {@code [next, codePoint]}:
+     {@code next} is the index past the escape (including the single whitespace delimiter a hex run may carry, a
+     CRLF pair counting as one delimiter), and {@code codePoint} is the decoded code point. Per the CSS spec a NUL,
+     surrogate, or out-of-range value becomes U+FFFD; a lone trailing backslash has no escape ({@code codePoint} is
+     {@code -1}) and is left to the caller as a stray character.
+     */
+    private static int[] consumeEscape(String value, int i, int end) {
+        if (i + 1 >= end) return new int[] {end, -1};
+        char next = value.charAt(i + 1);
+        if (isHex(next)) {
+            int h = i + 1;
+            int e = h;
+            while (e < end && e - h < 6 && isHex(value.charAt(e))) e++;
+            int code = Integer.parseInt(value.substring(h, e), 16);
+            int after = e;
+            if (after < end && isCssSpace(value.charAt(after))) {
+                after++; // the single delimiter whitespace is part of the hex escape
+                if (after - e == 2 && value.charAt(e) == '\r' && after < end && value.charAt(after) == '\n') after++;
+            }
+            if (code == 0 || code > Character.MAX_CODE_POINT
+                || (code >= Character.MIN_SURROGATE && code <= Character.MAX_SURROGATE))
+                code = 0xFFFD;
+            return new int[] {after, code};
+        }
+        return new int[] {i + 2, next};
+    }
+
+    /**
+     Applies the same reference rules to text that is not itself parsed as declarations — the free-form value of a
+     custom property. As in an ordinary value, quoted strings and comments are inert token separators (a fake call
+     written inside either never fetches), while every real {@code url(...)} (its name possibly hex- or
+     character-escaped), {@code @import}, and the legacy {@code expression(...)} function is normalized and checked.
      */
     private boolean freeTextIsSafe(String text) {
         int end = text.length();
         int i = 0;
         while (i < end) {
             char c = text.charAt(i);
-            if (c == '\\') { i += 2; continue; }
-            if (c == '@' && matchesName(text, i + 1, end, "import")) {
-                if (!freeTextImportIsSafe(text, i + 7, end)) return false;
-                i += 7;
+            if (c == '"' || c == '\'') {
+                int[] quote = scanQuoted(text, i + 1, c);
+                if (quote[1] != 1) return false;
+                if (stringGluesIdentToCall(text, i, quote[0], end)) return false; // e.g. "u"rl(...) or ur"l"(...)
+                i = quote[0] + 1;
                 continue;
             }
-            if (isIdentStart(c) || c == '-') {
-                int[] name = readName(text, i, end);
-                int j = skipSeparators(text, name[0], end);
+            if (c == '/' && i + 1 < end && text.charAt(i + 1) == '*') {
+                int close = text.indexOf("*/", i + 2);
+                if (close < 0) return false;
+                i = close + 2;
+                continue;
+            }
+            if (c == '@') {
+                StringBuilder atName = new StringBuilder();
+                int nameEnd = scanIdent(text, i + 1, end, atName);
+                if (atName.toString().equalsIgnoreCase("import") && !freeTextImportIsSafe(text, nameEnd, end))
+                    return false;
+                i = nameEnd > i + 1 ? nameEnd : i + 1;
+                continue;
+            }
+            if (isIdentStart(c) || c == '-' || c == '\\') {
+                StringBuilder decoded = new StringBuilder();
+                int nameEnd = scanIdent(text, i, end, decoded);
+                int j = skipSeparators(text, nameEnd, end);
                 if (j < 0) return false;
-                if (commentGluesNameToIdent(text, name[0], j, end)) return false; // e.g. ur/**/l(...)
+                if (commentGluesIdentToCall(text, nameEnd, end)) return false; // e.g. ur/**/l(...)
                 if (j < end && text.charAt(j) == '(') {
-                    String fnName = name[1] == 1 ? unescape(text.substring(i, name[0])) : text.substring(i, name[0]);
+                    String fnName = decoded.toString();
                     int argEnd = matchingParen(text, j + 1, end);
                     if (argEnd < 0) return false;
                     if (!isPlainName(fnName)) return false;
@@ -482,7 +535,7 @@ final class StyleCleaner {
                     i = j; // resume at '(' so a nested url()/expression() in the arguments is also checked
                     continue;
                 }
-                i = name[0];
+                i = nameEnd;
                 continue;
             }
             i++;
@@ -490,10 +543,32 @@ final class StyleCleaner {
         return true;
     }
 
+    /**
+     Tests whether a quoted string at {@code [open, close]} is glued without whitespace to identifier runs on
+     either side and followed by a call: {@code "u"rl(...)}, {@code ur"l"(...)}, or {@code u"rl"(...)}. Such
+     token sequences are value syntax errors a strict browser discards, but a lenient engine could read the glued
+     runs as one escaped {@code url} or {@code expression} call, so the declaration is rejected rather than risk a
+     split name escaping recognition. The adjacent runs are read with full escape semantics. Ordinary tokens
+     separated from the string by whitespace (such as a real {@code url(...)} later in the value) are unaffected.
+     */
+    private boolean stringGluesIdentToCall(String value, int open, int close, int end) {
+        boolean gluedBefore = open > 0 && isIdentChar(value.charAt(open - 1));
+        int after = close + 1;
+        boolean gluedAfter = after < end && (isIdentStart(value.charAt(after)) || value.charAt(after) == '\\');
+        if (!gluedBefore && !gluedAfter) return false;
+        int k = after;
+        if (gluedAfter) {
+            StringBuilder ignored = new StringBuilder();
+            k = scanIdent(value, k, end, ignored);
+        }
+        k = skipSeparators(value, k, end);
+        return k >= 0 && k < end && value.charAt(k) == '(';
+    }
+
     /** Checks the quoted-string or {@code url(...)} reference of an {@code @import} found in free text. */
     private boolean freeTextImportIsSafe(String text, int from, int end) {
-        int i = from;
-        while (i < end && isCssSpace(text.charAt(i))) i++;
+        int i = skipSeparators(text, from, end);
+        if (i < 0) return false;
         if (i >= end) return true; // a dangling "@import" with no reference is inert junk
         char c = text.charAt(i);
         if (c == '"' || c == '\'') {
@@ -501,9 +576,11 @@ final class StyleCleaner {
             if (quote[1] != 1) return false;
             return safelist.isSafeStyleUrl(tagName, el, unescape(text.substring(i + 1, quote[0])));
         }
-        if (matchesName(text, i, end, "url")) {
-            int k = skipSeparators(text, i + 3, end);
-            if (k < 0 || k >= end || text.charAt(k) != '(') return false;
+        if (isIdentStart(c) || c == '-' || c == '\\') {
+            StringBuilder fnName = new StringBuilder();
+            int nameEnd = scanIdent(text, i, end, fnName);
+            int k = skipSeparators(text, nameEnd, end);
+            if (k < 0 || k >= end || text.charAt(k) != '(' || !fnName.toString().equalsIgnoreCase("url")) return false;
             int argEnd = matchingParen(text, k + 1, end);
             return argEnd >= 0 && isSafeUrlArgument(text, k + 1, argEnd);
         }
@@ -530,11 +607,20 @@ final class StyleCleaner {
                 if (c == first) return false;
             }
         } else {
-            // an unquoted URL token is a single run: bare whitespace or quotes are syntax errors, not part of the URL
-            for (int k = i; k < j; k++) {
+            // an unquoted URL token is a single run: a bare quote or whitespace is a syntax error, not part of the
+            // URL. Whitespace that is the delimiter of a hex escape (or a whitespace character itself escaped) is
+            // part of the escape and so stays in the run, exactly as a browser reads it.
+            int k = i;
+            while (k < j) {
                 char c = value.charAt(k);
-                if (c == '\\') { k++; continue; }
+                if (c == '\\') {
+                    int[] escape = consumeEscape(value, k, j);
+                    if (escape[1] < 0) return false; // a lone trailing backslash is no URL token
+                    k = escape[0];
+                    continue;
+                }
                 if (c == '"' || c == '\'' || isCssSpace(c)) return false;
+                k++;
             }
             raw = value.substring(i, j);
         }
@@ -565,17 +651,6 @@ final class StyleCleaner {
             i++;
         }
         return -1;
-    }
-
-    private boolean matchesName(String value, int from, int end, String name) {
-        int len = name.length();
-        if (from + len > end) return false;
-        for (int k = 0; k < len; k++) {
-            char a = value.charAt(from + k);
-            char b = name.charAt(k);
-            if (a != b && a != Character.toUpperCase(b)) return false;
-        }
-        return true;
     }
 
     /**
