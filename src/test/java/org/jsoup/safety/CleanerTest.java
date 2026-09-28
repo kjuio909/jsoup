@@ -831,4 +831,91 @@ public class CleanerTest {
         assertEquals(original, dirty.body().html()); // source document untouched
         assertEquals("<p>a <b>b</b></p>c", TextUtil.stripNewlines(c1));
     }
+
+    // The String clean output is a fixed point even when one pass leaves structures the parser only normalizes on
+    // re-parse (block-inside-inline, nodes fostered out of table contexts), and pre/listing's initial LF survives.
+
+    @Test void preInitialNewlineSurvivesCleanAndReparse() {
+        // the parser consumes one LF right after a <pre>/<listing> start tag; the serializer doubles it for <pre> so
+        // the preserved leading newline is not lost across clean -> reparse -> clean
+        Safelist safelist = Safelist.none().addTags("pre", "listing", "textarea");
+
+        String pre = Jsoup.clean("<pre>\n\nkeep me</pre>", safelist);
+        assertEquals("<pre>\n\nkeep me</pre>", pre);
+        assertEquals(pre, Jsoup.clean(pre, safelist));
+        assertEquals("\nkeep me", Jsoup.parseBodyFragment(pre).expectFirst("pre").wholeOwnText());
+
+        // textarea is RCDATA here and its first LF is not consumed, so no doubling must occur
+        String textarea = Jsoup.clean("<textarea>\n\nkeep</textarea>", safelist);
+        assertEquals("<textarea>\n\nkeep</textarea>", textarea);
+        assertEquals(textarea, Jsoup.clean(textarea, safelist));
+    }
+
+    @Test void blockInsideInlineSettlesToFixedPoint() {
+        // a block (or br) nested in an inline element would get pretty-print indentation that re-parses as significant
+        // text; the returned string must already be in that settled state and keep the same visible text
+        Safelist safelist = Safelist.none().addTags("b", "p", "br");
+
+        for (String html : new String[]{"<b><p>q</p></b>", "<b>x<br>y</b>", "<b><p>a</p><p>b</p></b>"}) {
+            String clean1 = Jsoup.clean(html, safelist);
+            String clean2 = Jsoup.clean(clean1, safelist);
+            String clean3 = Jsoup.clean(clean2, safelist);
+            assertEquals(clean1, clean2, "re-clean must be stable for " + html);
+            assertEquals(clean2, clean3, "re-clean must be stable for " + html);
+            assertEquals(Jsoup.parseBodyFragment(html).body().text(),
+                Jsoup.parseBodyFragment(clean1).body().text(), "visible text must not change for " + html);
+        }
+    }
+
+    @Test void hoistedTableContentLandsWhereReparseKeepsIt() {
+        // <b> is hoisted out of the rejected <noscript> but starts inside a cell; on re-parse it would be
+        // foster-parented to before the table. The clean output must already place it there so re-clean is stable.
+        Safelist safelist = Safelist.none().addTags("table", "tbody", "tr", "td", "b", "p");
+        String html = "<table><tbody><tr><td>bare</td><noscript><b>ns</b></noscript></td></tr></tbody></table><p>end</p>";
+
+        String clean1 = Jsoup.clean(html, safelist);
+        String clean2 = Jsoup.clean(clean1, safelist);
+        assertEquals(clean1, clean2);
+
+        Document doc = Jsoup.parseBodyFragment(clean1);
+        assertEquals(0, doc.select("table b").size()); // foster content is not still inside the table
+        assertEquals(1, doc.select("b").size());
+        assertEquals("ns", doc.expectFirst("b").text());
+        assertEquals("bare", doc.expectFirst("td").text());
+        assertEquals("ns bare end", doc.body().text());
+    }
+
+    @Test void stableCleaningRespectsOutputSettings() {
+        Safelist safelist = Safelist.none().addTags("b", "p");
+        org.jsoup.nodes.Document.OutputSettings compact = new org.jsoup.nodes.Document.OutputSettings().prettyPrint(false);
+        String html = "<b><p>q</p></b>";
+
+        String clean1 = Jsoup.clean(html, "", safelist, compact);
+        assertEquals("<b><p>q</p></b>", clean1); // explicit compact settings are honored, not pretty-printed
+        assertEquals(clean1, Jsoup.clean(clean1, "", safelist, compact)); // fixed point under those settings
+
+        // the compact and pretty forms parse to the same visible text/structure
+        String pretty = Jsoup.clean(html, safelist);
+        assertEquals(Jsoup.parseBodyFragment(clean1).body().text(), Jsoup.parseBodyFragment(pretty).body().text());
+    }
+
+    @Test void scriptCharacterDataAndOrderPreservedAsSafeText() {
+        // contents of a rejected data element are character data, never nodes/attributes; surrounding safe text and
+        // allowed descendants come back in source order
+        Safelist safelist = Safelist.none().addTags("p", "b");
+        String html = "<p>a</p><script>if (a < b) alert(\"<b>x</b>\")</script><p>b</p>";
+
+        String clean1 = Jsoup.clean(html, safelist);
+        assertEquals("<p>a</p>\n<p>b</p>", clean1);
+        assertEquals(clean1, Jsoup.clean(clean1, safelist));
+        assertFalse(clean1.toLowerCase().contains("alert"));
+
+        // literal-looking markup supplied by the user as text stays text
+        String text = Jsoup.clean("<p>&lt;script&gt;1 &lt; 2 &amp; &quot;\\&quot;</p>", safelist);
+        assertEquals("<p>&lt;script&gt;1 &lt; 2 &amp; \"\\\"</p>", text);
+        assertEquals(text, Jsoup.clean(text, safelist));
+        Document reparsed = Jsoup.parseBodyFragment(text);
+        assertEquals(0, reparsed.select("script").size());
+        assertEquals("<script>1 < 2 & \"\\\"", reparsed.body().text());
+    }
 }

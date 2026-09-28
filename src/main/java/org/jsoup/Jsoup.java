@@ -4,9 +4,14 @@ import org.jsoup.helper.DataUtil;
 import org.jsoup.helper.HttpConnection;
 import org.jsoup.nodes.Document;
 import org.jsoup.nodes.Element;
+import org.jsoup.nodes.Node;
+import org.jsoup.nodes.TextNode;
 import org.jsoup.parser.Parser;
+import org.jsoup.parser.Tag;
 import org.jsoup.safety.Cleaner;
 import org.jsoup.safety.Safelist;
+import org.jsoup.select.NodeTraversor;
+import org.jsoup.select.NodeVisitor;
 import org.jspecify.annotations.Nullable;
 
 import java.io.File;
@@ -348,11 +353,125 @@ Connection con3 = session.newRequest();
             baseUri = DummyUri; // set a placeholder URI to allow relative links to pass abs resolution for protocol tests; won't leak to output
         }
 
-        Document dirty = parseBodyFragment(bodyHtml, baseUri);
         Cleaner cleaner = new Cleaner(safelist);
-        Document clean = cleaner.clean(dirty);
+        return stableCleanBodyHtml(bodyHtml, baseUri, cleaner, new Document.OutputSettings());
+    }
+
+    /**
+     Serializes a cleaned fragment and, when its structure would be re-normalized by an HTML re-parse, re-runs
+     parse &rarr; clean &rarr; serialize to a fixed point so that cleaning the returned HTML again yields the
+     identical string. Such structures are rare -- they arise when a rejected wrapper's safe nodes are hoisted into a
+     table context that foster-parents them on reparse, or where a block-level node sits inside an inline element and
+     the pretty-printer's indentation would become significant text -- and are detected first so the common case
+     costs only a single parse/clean. Cleaning a Document directly via {@link Cleaner#clean(Document)} is unaffected.
+     */
+    private static String stableCleanBodyHtml(String bodyHtml, String baseUri, Cleaner cleaner, Document.OutputSettings settings) {
+        Document cleaned = cleaner.clean(parseBodyFragment(bodyHtml, baseUri));
+        if (!needsSettle(cleaned.body(), settings.prettyPrint()))
+            return serializeClean(cleaned, settings);
+
+        String html = serializeClean(cleaned, settings);
+        for (int pass = 0; pass < MaxCleanSettlePasses; pass++) {
+            String next = serializeClean(cleaner.clean(parseBodyFragment(html, baseUri)), settings);
+            if (next.equals(html)) return next;
+            html = next;
+        }
+        return html;
+    }
+
+    private static String serializeClean(Document clean, Document.OutputSettings settings) {
+        clean.outputSettings(settings.clone());
         return clean.body().html();
     }
+
+    // table-model containers whose direct children are restricted; anything else is foster-parented on reparse
+    private static boolean isTableContainer(String name) {
+        return name.equals("table") || name.equals("tbody") || name.equals("thead") || name.equals("tfoot") || name.equals("tr");
+    }
+
+    private static boolean isTableModelChild(String container, String child) {
+        switch (container) {
+            case "table":
+                return child.equals("caption") || child.equals("colgroup") || child.equals("col")
+                    || child.equals("tbody") || child.equals("thead") || child.equals("tfoot") || child.equals("tr")
+                    || child.equals("script") || child.equals("template");
+            case "tbody": case "thead": case "tfoot":
+                return child.equals("tr") || child.equals("script") || child.equals("template");
+            case "tr":
+                return child.equals("td") || child.equals("th") || child.equals("script") || child.equals("template");
+            default:
+                return true;
+        }
+    }
+
+    // mirrors Printer.Pretty: br and (unknown-tag) elements holding block children lay out as blocks
+    private static boolean isBlockLike(Element el) {
+        if (el.nameIs("br")) return true;
+        if (el.isBlock()) return true;
+        if (!el.tag().isKnownTag())
+            return el.parentNode() instanceof Document || hasBlockChild(el);
+        return false;
+    }
+
+    private static boolean isBlockContext(Element el) {
+        if (el.nameIs("br")) return false;
+        if (el.isBlock()) return true;
+        if (!el.tag().isKnownTag())
+            return el.parentNode() instanceof Document || hasBlockChild(el);
+        return false;
+    }
+
+    private static boolean hasBlockChild(Element el) {
+        Element child = el.firstElementChild();
+        for (int i = 0; i < 5 && child != null; i++) {
+            if (child.isBlock() || !child.tag().isKnownTag()) return true;
+            child = child.nextElementSibling();
+        }
+        return false;
+    }
+
+    /**
+     Conservative check for structures in the cleaned body whose serialized form would change when read back by the
+     HTML parser. Deliberately may over-report (which only costs an extra settle pass), but must not miss any
+     structure that would drift, or re-cleaning the output would not be a fixed point.
+     @param prettyPrint whether the result will be pretty-printed; only then can indentation inside an inline element
+     become significant text on re-parse
+     */
+    private static boolean needsSettle(Element body, boolean prettyPrint) {
+        boolean[] settle = {false};
+        NodeTraversor.traverse(new NodeVisitor() {
+            @Override public void head(Node node, int depth) {
+                if (settle[0] || !(node.parentNode() instanceof Element)) return;
+                Element parent = (Element) node.parentNode();
+                String parentName = parent.normalName();
+                boolean parentHtml = parent.tag().namespace().equals(Parser.NamespaceHtml);
+
+                if (node instanceof Element) {
+                    Element el = (Element) node;
+                    // a non-table-model element nested directly in a table container is foster-parented on reparse
+                    if (parentHtml && isTableContainer(parentName) && el.tag().namespace().equals(Parser.NamespaceHtml)
+                        && !isTableModelChild(parentName, el.normalName())) {
+                        settle[0] = true;
+                        return;
+                    }
+                    // a block-level child of an inline (non-block, non-inline-container) element makes the pretty
+                    // printer emit indentation that re-parses as significant text
+                    if (prettyPrint && isBlockLike(el) && !isBlockContext(parent)
+                        && !parent.tag().is(Tag.InlineContainer)) {
+                        settle[0] = true;
+                    }
+                } else if (node instanceof TextNode && parentHtml && isTableContainer(parentName)) {
+                    // only inter-element whitespace may sit directly in a table container; other text is fostered
+                    if (!((TextNode) node).isBlank()) settle[0] = true;
+                }
+            }
+            @Override public void tail(Node node, int depth) { }
+        }, body);
+        return settle[0];
+    }
+
+    // parse/clean/serialize settles to a fixed point in a couple of passes; bound the loop defensively
+    private static final int MaxCleanSettlePasses = 10;
 
     /**
      Get safe HTML from untrusted input HTML, by parsing input HTML and filtering it through a safe-list of permitted
@@ -403,11 +522,8 @@ Connection con3 = session.newRequest();
      * @see Cleaner#clean(Document)
      */
     public static String clean(String bodyHtml, String baseUri, Safelist safelist, Document.OutputSettings outputSettings) {
-        Document dirty = parseBodyFragment(bodyHtml, baseUri);
         Cleaner cleaner = new Cleaner(safelist);
-        Document clean = cleaner.clean(dirty);
-        clean.outputSettings(outputSettings);
-        return clean.body().html();
+        return stableCleanBodyHtml(bodyHtml, baseUri, cleaner, outputSettings);
     }
 
     /**

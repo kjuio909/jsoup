@@ -7,6 +7,9 @@ import org.jsoup.parser.Tag;
 import org.jsoup.select.NodeVisitor;
 import org.jspecify.annotations.Nullable;
 
+import static org.jsoup.nodes.Document.OutputSettings.Syntax.html;
+import static org.jsoup.parser.Parser.NamespaceHtml;
+
 /** Base Printer */
 class Printer implements NodeVisitor {
     final Node root;
@@ -21,6 +24,16 @@ class Printer implements NodeVisitor {
 
     void addHead(Element el, int depth) {
         el.outerHtmlHead(accum, settings);
+        // The parser ignores a single LF immediately after a <pre> start tag, so emit a duplicate: otherwise the
+        // preserved leading newline would be lost when this output is re-parsed, making serialize -> reparse ->
+        // serialize (and a second clean) drop one newline each time.
+        if (settings.syntax() == html && el.tag().namespace().equals(NamespaceHtml)
+            && el.nameIs("pre")
+            && el.firstChild() instanceof TextNode) {
+            String text = ((TextNode) el.firstChild()).getWholeText();
+            if (text.startsWith("\n"))
+                accum.append('\n');
+        }
     }
 
     void addTail(Element el, int depth) {
