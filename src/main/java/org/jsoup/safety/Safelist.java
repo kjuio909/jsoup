@@ -12,9 +12,12 @@ import org.jsoup.nodes.Attribute;
 import org.jsoup.nodes.Attributes;
 import org.jsoup.nodes.Element;
 
+import java.util.Arrays;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
@@ -76,6 +79,14 @@ public class Safelist {
     private static final TagName AllTag = TagName.valueOf(All);
     private static final String Srcset = "srcset";
     private static final AttributeKey SrcsetKey = AttributeKey.valueOf(Srcset);
+    private static final String Style = "style";
+    private static final AttributeKey StyleKey = AttributeKey.valueOf(Style);
+    // external references in an allowed inline style attribute default to the same safe URL protocols as an image:
+    // http(s), plus same-document fragment references such as url(#gradient). Any other protocol (javascript:,
+    // vbscript:, data:, or an unknown scheme) is rejected unless the caller configures an explicit protocol set for
+    // the tag's style attribute.
+    private static final Set<Protocol> DefaultStyleProtocols = Collections.unmodifiableSet(new HashSet<>(Arrays.asList(
+        Protocol.valueOf("http"), Protocol.valueOf("https"), Protocol.valueOf("#"))));
     private final Set<TagName> tagNames; // tags allowed, lower case. e.g. [p, br, span]
     private final Map<TagName, Set<AttributeKey>> attributes; // tag -> attribute[]. allowed attributes [href] for a tag.
     private final Map<TagName, Map<AttributeKey, AttributeValue>> enforcedAttributes; // always set these attribute values
@@ -541,8 +552,8 @@ public class Safelist {
         if (okSet != null && okSet.contains(key)) {
             if (protocols.containsKey(tag)) {
                 Map<AttributeKey, Set<Protocol>> attrProts = protocols.get(tag);
-                // ok if not defined protocol; otherwise test. srcset URLs are tested per candidate in the Cleaner.
-                return !attrProts.containsKey(key) || isSrcset(attr.getKey())
+                // ok if not defined protocol; otherwise test. srcset and style URLs are tested per reference in the Cleaner.
+                return !attrProts.containsKey(key) || isSrcset(attr.getKey()) || isStyle(attr.getKey())
                     || (isSoundUrlValue(attr.getValue())
                         && isSafeProtocol(getProtocolValue(el, attr), attrProts.get(key)));
             } else { // attribute found, no protocols defined, so OK
@@ -611,6 +622,99 @@ public class Safelist {
      */
     static boolean isSrcset(String attrKey) {
         return attrKey.equalsIgnoreCase(Srcset);
+    }
+
+    /**
+     Tests if the attribute is the inline CSS {@code style} attribute (case-insensitive), whose declarations are
+     * parsed and checked individually in the {@link Cleaner}, rather than treated as a single URL value.
+     */
+    static boolean isStyle(String attrKey) {
+        return attrKey.equalsIgnoreCase(Style);
+    }
+
+    /**
+     Cleans an inline {@code style} attribute value declaration by declaration. Declarations that are malformed, or
+     * that reference an external resource ({@code url(...)}, {@code @import}, or the legacy {@code expression(...)}
+     * function) whose URL fails the protocol rules configured for the tag's style attribute, are removed individually;
+     * the surviving declarations keep their original order and text. Does not throw on malformed CSS.
+
+     @param tagName the tag the attribute is on; selects the applicable protocol configuration
+     @param el the element the attribute is on, to resolve URLs against its base URI
+     @param value the source style attribute value
+     @return the cleaned value, or {@code null} if no declaration survives (in which case the attribute is removed)
+     */
+    String cleanStyle(String tagName, Element el, String value) {
+        return StyleCleaner.clean(this, tagName, el, value);
+    }
+
+    /**
+     Finds the protocol configuration applicable to external references inside an allowed {@code style} attribute on
+     * the given tag, following the same tag to {@code :all} fallback as the other attribute checks. Unlike a
+     * {@code href} or {@code srcset}, removing every configured protocol does not open style up to arbitrary
+     * schemes: when the caller has configured nothing for style (or removed it all), references are restricted to
+     * the safe default set ({@code http}, {@code https}, and same-document fragments).
+     */
+    private Set<Protocol> styleProtocols(TagName tag) {
+        Set<AttributeKey> okSet = attributes.get(tag);
+        if (okSet != null && okSet.contains(StyleKey)) {
+            Map<AttributeKey, Set<Protocol>> attrProts = protocols.get(tag);
+            if (attrProts != null && attrProts.containsKey(StyleKey)) return attrProts.get(StyleKey);
+            return DefaultStyleProtocols;
+        }
+        Map<AttributeKey, AttributeValue> enforcedSet = enforcedAttributes.get(tag);
+        if (enforcedSet != null && enforcedSet.containsKey(StyleKey)) return DefaultStyleProtocols;
+        return !tag.equals(AllTag) ? styleProtocols(AllTag) : DefaultStyleProtocols;
+    }
+
+    /**
+     Validates one external reference found inside a style declaration against the tag's configured style protocols,
+     * applying the same obfuscation-resistant rules as a {@code srcset} candidate. {@code javascript:} and
+     * {@code vbscript:} are always rejected (even after control-character stripping and percent-decoding), and so is
+     * any unknown scheme; a {@code data:} reference passes only when {@code data} is an explicitly allowed protocol
+     * and its media type is inert. Relative references are resolved against the element's document base URI, and an
+     * unresolvable reference (such as a relative URL with no base URI) is rejected.
+     */
+    boolean isSafeStyleUrl(String tagName, Element el, String url) {
+        Set<Protocol> protocols = styleProtocols(TagName.valueOf(tagName));
+        if (!isSoundUrlValue(url)) return false;
+
+        // script-bearing schemes are always rejected, after undoing every encoding layer a browser applies
+        // (HTML entities are already decoded by the parser; CSS escapes by StyleCleaner): strip control bytes and
+        // leniently percent-decode before testing the prefix
+        String decoded = lowerCase(stripControlChars(percentDecode(url)));
+        if (decoded.startsWith("javascript:") || decoded.startsWith("vbscript:")) return false;
+
+        if (!isSafeDecodedScheme(url, protocols)) return false;
+        if (decoded.startsWith("data:") && !isSafeDataUrl(url, protocols)) return false;
+
+        // resolve relative references against the document base, applying the same rules as a srcset candidate:
+        // an unresolvable reference (e.g. no base URI) fails, and the surviving declaration keeps its source spelling
+        String resolved = StringUtil.resolve(el.baseUri(), url);
+        if (resolved.isEmpty() && !StringUtil.hasHttpScheme(url)) resolved = url;
+        return isSafeProtocol(resolved, protocols);
+    }
+
+    /**
+     Allows a {@code data:} URL only when {@code data} is an explicitly configured protocol and the embedded media
+     * type is a known inert type (an image, or plain text); {@code data:text/html}, {@code data:image/svg+xml}, and
+     * any executable or unknown media type are rejected.
+     */
+    private static boolean isSafeDataUrl(String url, Set<Protocol> protocols) {
+        boolean dataAllowed = false;
+        for (Protocol protocol : protocols) {
+            if (protocol.toString().equals("data")) { dataAllowed = true; break; }
+        }
+        if (!dataAllowed) return false;
+        String rest = url.substring("data:".length());
+        int semi = rest.indexOf(';');
+        int comma = rest.indexOf(',');
+        int end = semi >= 0 ? semi : comma;
+        if (end < 0) end = rest.length();
+        String mediaType = rest.substring(0, end).trim().toLowerCase(Locale.ROOT);
+        if (mediaType.isEmpty()) mediaType = "text/plain"; // the default for data: URLs
+        if (mediaType.startsWith("image/"))
+            return !mediaType.equals("image/svg+xml"); // SVG can carry script
+        return mediaType.equals("text/plain");
     }
 
     /**

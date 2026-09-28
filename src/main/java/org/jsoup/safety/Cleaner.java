@@ -235,6 +235,15 @@ public class Cleaner {
                     if (!cleaned.equals(value))
                         numDiscarded++; // candidates were dropped or normalized
                     value = cleaned;
+                } else if (Safelist.isStyle(key)) { // clean inline CSS declaration by declaration; drop if none survive
+                    String cleaned = safelist.cleanStyle(sourceTag, sourceEl, value);
+                    if (cleaned == null) {
+                        numDiscarded++;
+                        continue;
+                    }
+                    if (!cleaned.equals(value))
+                        numDiscarded++; // unsafe or malformed declarations were dropped
+                    value = cleaned;
                 } else if (safelist.shouldAbsUrl(sourceTag, key)) { // configured to make absolute urls for this key (href)
                     value = sourceEl.absUrl(key);
                     if (value.isEmpty()) // could not be made abs; leave as-is to allow custom unknown protocols
