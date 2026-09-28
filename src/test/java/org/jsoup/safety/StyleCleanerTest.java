@@ -137,7 +137,8 @@ public class StyleCleanerTest {
             clean("<div style=\"background:\\75 rl(https://example.com/x.png);color:red\">x</div>"));
         assertEquals("<div style=\"background:u\\72 l(https://example.com/x.png);color:red\">x</div>",
             clean("<div style=\"background:u\\72 l(https://example.com/x.png);color:red\">x</div>"));
-        assertEquals("<div style=\"background:\\55 RL(//cdn.example.com/x.png)\">x</div>",
+        // a protocol-relative reference cannot inherit the base scheme, even behind an escaped function name
+        assertEquals("<div>x</div>",
             clean("<div style=\"background:\\55 RL(//cdn.example.com/x.png)\">x</div>"));
         // a safe relative reference still resolves against the element's document base
         assertEquals("<div style=\"background:\\75 rl(img/x.png)\">x</div>",
@@ -216,9 +217,39 @@ public class StyleCleanerTest {
         assertTrue(new Cleaner(styleSafelist()).isValid(dirty));
     }
 
-    @Test void protocolRelativeReferenceInheritsBaseScheme() {
-        String html = "<div style=\"background:url(//cdn.example.com/x.png)\">x</div>";
-        assertEquals(html, clean(html, Base, styleSafelist()));
+    @Test void protocolRelativeReferenceNeverInheritsBaseScheme() {
+        // a protocol-relative reference carries no scheme of its own; it must not be allowed by inheriting the base
+        // document's scheme during resolution
+        assertEquals("<div>x</div>", clean("<div style=\"background:url(//cdn.example.com/x.png)\">x</div>"));
+        // a safe declaration in the same attribute survives; the protocol-relative one alone is removed
+        assertEquals("<div style=\"color:red\">x</div>",
+            clean("<div style=\"background:url(//cdn.example.com/x.png);color:red\">x</div>"));
+        // the same goes for an @import reference
+        assertEquals("<div style=\"color:red\">x</div>",
+            clean("<div style=\"@import '//cdn.example.com/x.css';color:red\">x</div>"));
+        // a root-relative reference (a single slash) is not protocol-relative and stays resolvable against the base
+        assertEquals("<div style=\"background:url(/x.png)\">x</div>",
+            clean("<div style=\"background:url(/x.png)\">x</div>"));
+        // a slash followed by a (CSS-escaped) backslash decodes to a single-slash root-relative path, not an authority
+        assertEquals("<div style=\"background:url(/\\x.png)\">x</div>",
+            clean("<div style=\"background:url(/\\x.png)\">x</div>"));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {
+        "//cdn.example.com/x.png",
+        "\\/\\/cdn.example.com/x.png", // CSS character escapes of both slashes decode to "//"
+        "\\\\\\\\cdn.example.com/x.png", // four source backslashes decode to the "\\" authority spelling
+        "%2f%2fcdn.example.com/x.png", // percent-encoded slashes
+        "%2F%2Fcdn.example.com/x.png",
+        "%5c%5ccdn.example.com/x.png", // percent-encoded backslashes
+        "  //cdn.example.com/x.png  ", // surrounding whitespace is trimmed by url()
+    })
+    void rejectsObfuscatedProtocolRelativeReferences(String ref) {
+        assertEquals("<div>x</div>",
+            clean("<div style=\"background:url(" + ref + ")\">x</div>"), ref);
+        assertEquals("<div style=\"color:red\">x</div>",
+            clean("<div style=\"background:url(" + ref + ");color:red\">x</div>"), ref);
     }
 
     @Test void relativeReferenceWithoutBaseIsRejected() {

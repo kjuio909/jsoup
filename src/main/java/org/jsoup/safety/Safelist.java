@@ -684,6 +684,13 @@ public class Safelist {
         String decoded = lowerCase(stripControlChars(percentDecode(url)));
         if (decoded.startsWith("javascript:") || decoded.startsWith("vbscript:")) return false;
 
+        // a protocol-relative reference ("//host", or the backslash spellings a browser's special-scheme parser
+        // treats identically) would inherit the base document's scheme during resolution; it carries no allowed
+        // scheme of its own and so is rejected outright, regardless of the configured protocol set. The check runs
+        // only after CSS escapes (StyleCleaner), percent-decoding, and control-char stripping have been undone, so
+        // e.g. "\/\/host", "%2f%2fhost", and "%5c%5chost" are recognized just like "//host".
+        if (startsWithAuthority(decoded)) return false;
+
         if (!isSafeDecodedScheme(url, protocols)) return false;
         if (decoded.startsWith("data:") && !isSafeDataUrl(url, protocols)) return false;
 
@@ -692,6 +699,23 @@ public class Safelist {
         String resolved = StringUtil.resolve(el.baseUri(), url);
         if (resolved.isEmpty() && !StringUtil.hasHttpScheme(url)) resolved = url;
         return isSafeProtocol(resolved, protocols);
+    }
+
+    /**
+     Tests whether an (already CSS-unescaped, percent-decoded, control-stripped, lower-cased) reference begins with an
+     authority component with no scheme of its own, mirroring how a browser's special-scheme URL parser reads the
+     prefix: {@code //host}, or a leading backslash followed by either slash or backslash ({@code \\host},
+     {@code \/host}). Such a network-path reference inherits the base document's scheme and is never an allowed,
+     independently-schemed absolute URL. A single leading slash stays a root-relative, same-origin reference —
+     including {@code /\path}, whose second character is a backslash but which the browser does not read as the
+     start of an authority — and so is left to normal base-URI resolution.
+     */
+    private static boolean startsWithAuthority(String decoded) {
+        if (decoded.length() < 2) return false;
+        char first = decoded.charAt(0);
+        char second = decoded.charAt(1);
+        if (first == '/') return second == '/'; // "/\" is a root-relative path, not an authority
+        return first == '\\' && (second == '/' || second == '\\'); // browsers tolerate backslashes under special schemes
     }
 
     /**
