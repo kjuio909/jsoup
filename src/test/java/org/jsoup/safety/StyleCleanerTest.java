@@ -81,6 +81,20 @@ public class StyleCleanerTest {
         "url(VBSCRIPT:msgbox(1))",
         "expression(alert(1))",
         "EXPRESSION/**/(alert(1))",
+        // a hex/backslash-escaped function name decodes to the same token and must not evade recognition
+        "\\75rl(javascript:alert(1))",
+        "\\75 rl(javascript:alert(1))", // the single space is the hex-escape delimiter, so this still reads "url"
+        "u\\72 l(javascript:alert(1))",
+        "\\55RL(JAVASCRIPT:alert(1))",
+        "&#92;75rl(javascript:alert(1))", // backslash delivered via an HTML entity
+        "\\65xpression(alert(1))",
+        "\\65 xpression(alert(1))",
+        "\\65\\78\\70\\72\\65\\73\\73\\69\\6f\\6e(alert(1))", // every letter hex escaped
+        "calc(\\75rl(javascript:alert(1)))", // escaped call nested inside another function
+        "calc(1+u\\72 l(javascript:alert(1)))",
+        "ur/**/\\6c(javascript:alert(1))", // a comment gluing an escaped second run onto "ur"
+        "\\75r/**/l(javascript:alert(1))",
+        "expr/**/\\65ssion(alert(1))",
     })
     void rejectsDangerousReferences(String value) {
         String html = "<div style=\"background:" + value + ";color:red\">x</div>";
@@ -94,6 +108,59 @@ public class StyleCleanerTest {
     @Test void allowsSafeHttpUrlsVerbatim() {
         String html = "<div style=\"background:url(https://example.com/x.png);color:red\">x</div>";
         assertEquals(html, clean(html));
+    }
+
+    @Test void escapedSafeReferenceHasSameConclusionAsLiteral() {
+        // a hex/backslash-escaped name that decodes to url() is checked exactly like the literal url() spelling:
+        // safe references keep their original (escaped) text, base resolution, and order
+        assertEquals("<div style=\"background:\\75rl(https://example.com/x.png);color:red\">x</div>",
+            clean("<div style=\"background:\\75rl(https://example.com/x.png);color:red\">x</div>"));
+        assertEquals("<div style=\"background:\\75 rl(img/x.png);color:red\">x</div>",
+            clean("<div style=\"background:\\75 rl(img/x.png);color:red\">x</div>"));
+        assertEquals("<div style=\"background:\\75 rl(//cdn.example.com/x.png);color:red\">x</div>",
+            clean("<div style=\"background:\\75 rl(//cdn.example.com/x.png);color:red\">x</div>"));
+        // but an escaped relative reference with no base URI is still unresolvable, so only its declaration is lost
+        assertEquals("<div style=\"color:red\">x</div>",
+            clean("<div style=\"background:\\75 rl(img/x.png);color:red\">x</div>", "", styleSafelist()));
+        // an escaped name inside a nested function, a custom property, a comment, or an @import is checked too
+        assertEquals("<div style=\"width:calc(\\75rl(https://example.com/x.png) + 1px);color:red\">x</div>",
+            clean("<div style=\"width:calc(\\75rl(https://example.com/x.png) + 1px);color:red\">x</div>"));
+        assertEquals("<div style=\"--x:\\75rl(https://example.com/x.png);color:red\">x</div>",
+            clean("<div style=\"--x:\\75rl(https://example.com/x.png);color:red\">x</div>"));
+        assertEquals("<div style=\"color:red;x:y /* \\75rl(https://example.com/x.png) */\">x</div>",
+            clean("<div style=\"color:red;x:y /* \\75rl(https://example.com/x.png) */\">x</div>"));
+        assertEquals("<div style=\"@import \\75rl(https://example.com/x.css);color:red\">x</div>",
+            clean("<div style=\"@import \\75rl(https://example.com/x.css);color:red\">x</div>"));
+    }
+
+    @Test void escapedReferencesInsideStringsAreChecked() {
+        // the argument of a quoted url() is unescaped by the browser before fetching, so an escaped name in a string
+        // body is checked just the same
+        assertEquals("<div style=\"color:red\">x</div>",
+            clean("<div style=\"font-family:'\\75rl(javascript:alert(1))';color:red\">x</div>"));
+        assertEquals("<div style=\"color:red\">x</div>",
+            clean("<div style=\"font-family:&quot;\\65xpression(alert(1))&quot;;color:red\">x</div>"));
+        assertEquals("<div style=\"color:red\">x</div>",
+            clean("<div style=\"--x:exp\\72 ession(alert(1));color:red\">x</div>"));
+    }
+
+    @Test void cssTokenBoundariesOfEscapesAreRespected() {
+        // a hex escape consumes exactly one trailing whitespace delimiter: with two spaces the decoded "u" and "rl"
+        // stay two separate tokens, so there is no url() reference here and the inert declaration survives
+        assertEquals("<div style=\"background:\\75  rl(javascript:alert(1));color:red\">x</div>",
+            clean("<div style=\"background:\\75  rl(javascript:alert(1));color:red\">x</div>"));
+        // "\28" decodes to "(" which is part of the identifier, so this is one identifier token, not a url() call
+        assertEquals("<div style=\"background:url\\28javascript:1;color:red\">x</div>",
+            clean("<div style=\"background:url\\28javascript:1;color:red\">x</div>"));
+    }
+
+    @Test void escapedAtKeywordIsCheckedLikeLiteral() {
+        assertEquals("<div style=\"color:red\">x</div>",
+            clean("<div style=\"@\\69mport url(javascript:1);color:red\">x</div>"));
+        assertEquals("<div style=\"color:red\">x</div>",
+            clean("<div style=\"@\\69mport 'javascript:1';color:red\">x</div>"));
+        assertEquals("<div style=\"color:red\">x</div>",
+            clean("<div style=\"@impor\\74 \\75rl(javascript:1);color:red\">x</div>"));
     }
 
     @Test void resolvesSafeRelativeReferenceAgainstBaseAndKeepsSourceSpelling() {

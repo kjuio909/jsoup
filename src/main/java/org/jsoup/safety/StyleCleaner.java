@@ -21,7 +21,10 @@ import java.util.Arrays;
  can never survive inside a comment.
  Each surviving declaration is scanned for references ({@code url(...)}, the legacy {@code expression(...)}
  function, and an {@code @import} at-rule) and every reference found is normalized through CSS unescaping and checked
- against the safelist's URL rules. Repeated separators and other degenerate input never throw and never cause
+ against the safelist's URL rules. A reference cannot hide behind an escaped function name: hex and backslash escapes
+ in the name itself (including the single whitespace delimiter of a hex escape, so {@code \75 rl(...)} reads as
+ {@code url(...)}), case variants, nested parentheses and strings, and a comment that glues two name runs are all
+ resolved before the name is compared. Repeated separators and other degenerate input never throw and never cause
  following declarations to be joined into a rejected value.</p>
 
  <p>The cleaner is stateless and thread-safe; all per-value state lives on the local parse stack.</p>
@@ -253,9 +256,11 @@ final class StyleCleaner {
      * reference.
      */
     private boolean isSafeImportDeclaration(String value, int at, int end) {
-        int i = at + 1;
-        if (!matchesName(value, i, end, "import")) return false;
-        i += 6;
+        int[] kw = readName(value, at + 1, end); // the at-keyword token, escapes normalized
+        if (kw[0] <= at + 1) return false;
+        String keyword = kw[1] == 1 ? unescape(value.substring(at + 1, kw[0])) : value.substring(at + 1, kw[0]);
+        if (!keyword.equalsIgnoreCase("import")) return false;
+        int i = kw[0];
         while (i < end && isCssSpace(value.charAt(i))) i++;
         if (i == end) return false;
         int afterRef;
@@ -265,8 +270,12 @@ final class StyleCleaner {
             if (quote[1] != 1) return false;
             if (!safelist.isSafeStyleUrl(tagName, el, unescape(value.substring(i + 1, quote[0])))) return false;
             afterRef = quote[0] + 1;
-        } else if (matchesName(value, i, end, "url")) {
-            int k = skipSeparators(value, i + 3, end);
+        } else if (isIdentStart(c) || c == '-' || c == '\\') {
+            int[] name = readName(value, i, end); // an escaped "\75rl" reads as the same "url" token
+            if (name[0] == i) return false;
+            String fnName = name[1] == 1 ? unescape(value.substring(i, name[0])) : value.substring(i, name[0]);
+            if (!fnName.equalsIgnoreCase("url")) return false;
+            int k = skipSeparators(value, name[0], end);
             if (k < 0 || k >= end || value.charAt(k) != '(') return false;
             int argEnd = matchingParen(value, k + 1, end);
             if (argEnd < 0 || !isSafeUrlArgument(value, k + 1, argEnd)) return false;
@@ -306,15 +315,15 @@ final class StyleCleaner {
 
     /**
      Tests whether the gap {@code [nameEnd, sepEnd)} just skipped is made up solely of block comments with no
-     * whitespace and glues the preceding name to another identifier run that is itself followed (optionally via
-     * separators) by {@code (}. A comment wedged between two identifier runs ({@code ur/**\/l( ... )} or
-     * {@code expr/**\/ession( ... )}) does not join them under a strict CSS tokenizer, but a lenient engine could
-     * read the glued run as a single function token; such a declaration is rejected rather than risk a split
-     * {@code url} or {@code expression} escaping recognition. Two bare runs without a following call
-     * ({@code a/**\/b}) stay untouched.
+     * whitespace and glues the preceding name to another identifier run (literal or hex/backslash escaped) that is
+     * itself followed (optionally via separators) by {@code (}. A comment wedged between two identifier runs
+     * ({@code ur/**\/l( ... )}, {@code expr/**\/ession( ... )}, or the escaped {@code ur/**\/\6c( ... )}) does not
+     * join them under a strict CSS tokenizer, but a lenient engine could read the glued run as a single function
+     * token; such a declaration is rejected rather than risk a split {@code url} or {@code expression} escaping
+     * recognition. Two bare runs without a following call ({@code a/**\/b}) stay untouched.
      */
     private boolean commentGluesNameToIdent(String value, int nameEnd, int sepEnd, int end) {
-        if (sepEnd >= end || !isIdentChar(value.charAt(sepEnd))) return false;
+        if (sepEnd >= end || !(isIdentChar(value.charAt(sepEnd)) || value.charAt(sepEnd) == '\\')) return false;
         int i = nameEnd;
         boolean sawComment = false;
         while (i < sepEnd) {
@@ -330,8 +339,7 @@ final class StyleCleaner {
             return false;
         }
         if (!sawComment) return false;
-        int k = sepEnd;
-        while (k < end && isIdentChar(value.charAt(k))) k++; // the run the comment glued onto
+        int k = readName(value, sepEnd, end)[0]; // the run the comment glued onto, escapes included
         k = skipSeparators(value, k, end);
         return k >= 0 && k < end && value.charAt(k) == '(';
     }
@@ -363,7 +371,6 @@ final class StyleCleaner {
         int i = start;
         while (i < end) {
             char c = value.charAt(i);
-            if (c == '\\') { i += 2; continue; }
             if (c == '"' || c == '\'') {
                 int[] quote = scanQuoted(value, i + 1, c);
                 if (quote[1] != 1) return false; // no bad-string recovery inside a value being checked
@@ -388,9 +395,10 @@ final class StyleCleaner {
                 continue;
             }
             if (c == '@') return false; // no at-rule (e.g. a buried @import) is valid inside a declaration value
-            if (isIdentStart(c) || c == '-') {
+            if (isIdentStart(c) || c == '-' || c == '\\') {
                 int[] name = readName(value, i, end);
                 int nameEnd = name[0];
+                if (nameEnd == i) return false; // a lone trailing '\' starts no token; treat the value as malformed
                 String fnName = name[1] == 1 ? unescape(value.substring(i, nameEnd)) : value.substring(i, nameEnd);
                 int j = skipSeparators(value, nameEnd, end);
                 if (j < 0) return false; // an unterminated or unsafe comment after the name rejects the declaration
@@ -430,7 +438,9 @@ final class StyleCleaner {
     /**
      Reads a CSS name token (identifier characters, plus backslash escapes) from {@code from}. Returns
      {@code [end, escaped]}: {@code end} is the index after the token, and {@code escaped} is 1 when it contained a
-     backslash. A leading run of dashes is consumed so that e.g. {@code -moz-binding} reads as one token.
+     backslash. A leading run of dashes is consumed so that e.g. {@code -moz-binding} reads as one token. A hex
+     escape is consumed together with its single trailing whitespace delimiter, so a name such as
+     {@code \65 xpression} reads as the single token {@code expression}.
      */
     private int[] readName(String value, int from, int end) {
         int i = from;
@@ -440,13 +450,29 @@ final class StyleCleaner {
             if (c == '\\') {
                 if (i + 1 >= end) break;
                 escaped = 1;
-                i += 2;
+                i = escapeEnd(value, i, end);
                 continue;
             }
             if (isIdentChar(c)) { i++; continue; }
             break;
         }
         return new int[] {i, escaped};
+    }
+
+    /**
+     Returns the index just past the CSS escape beginning at the backslash at {@code pos}: a run of at most six hex
+     digits, optionally followed by a single whitespace delimiter (which the hex escape consumes), or the escaped
+     code unit itself. {@code pos} must point at a backslash with at least one following unit.
+     */
+    private int escapeEnd(String value, int pos, int end) {
+        int h = pos + 1;
+        int hexEnd = h;
+        while (hexEnd < end && hexEnd - h < 6 && isHex(value.charAt(hexEnd))) hexEnd++;
+        if (hexEnd > h) {
+            if (hexEnd < end && isCssSpace(value.charAt(hexEnd))) hexEnd++;
+            return hexEnd;
+        }
+        return pos + 2; // a non-hex escape covers exactly the backslash and the next code unit
     }
 
     /**
@@ -461,14 +487,29 @@ final class StyleCleaner {
         int i = 0;
         while (i < end) {
             char c = text.charAt(i);
-            if (c == '\\') { i += 2; continue; }
-            if (c == '@' && matchesName(text, i + 1, end, "import")) {
-                if (!freeTextImportIsSafe(text, i + 7, end)) return false;
-                i += 7;
+            if (c == '@') {
+                int[] atName = readName(text, i + 1, end); // the at-keyword token, escapes normalized
+                if (atName[0] > i + 1) {
+                    String keyword = atName[1] == 1 ? unescape(text.substring(i + 1, atName[0]))
+                        : text.substring(i + 1, atName[0]);
+                    if (keyword.equalsIgnoreCase("import")) {
+                        if (!freeTextImportIsSafe(text, atName[0], end)) return false;
+                        // resume right after "import" so any trailing references are scanned in the ordinary pass
+                        i = atName[0];
+                        continue;
+                    }
+                    // a glued token such as "@importurl(...)" (an at-keyword with no boundary before a call) has no
+                    // reliable parse boundary; treat it as unsafe rather than let a concealed reference slip past
+                    if (keyword.toLowerCase(java.util.Locale.ROOT).startsWith("import")) return false;
+                    i++;
+                    continue;
+                }
+                i++;
                 continue;
             }
-            if (isIdentStart(c) || c == '-') {
+            if (isIdentStart(c) || c == '-' || c == '\\') {
                 int[] name = readName(text, i, end);
+                if (name[0] == i) { i++; continue; } // a lone trailing '\' is inert text
                 int j = skipSeparators(text, name[0], end);
                 if (j < 0) return false;
                 if (commentGluesNameToIdent(text, name[0], j, end)) return false; // e.g. ur/**/l(...)
@@ -501,8 +542,12 @@ final class StyleCleaner {
             if (quote[1] != 1) return false;
             return safelist.isSafeStyleUrl(tagName, el, unescape(text.substring(i + 1, quote[0])));
         }
-        if (matchesName(text, i, end, "url")) {
-            int k = skipSeparators(text, i + 3, end);
+        if (isIdentStart(c) || c == '-' || c == '\\') {
+            int[] name = readName(text, i, end);
+            if (name[0] == i) return false;
+            String fnName = name[1] == 1 ? unescape(text.substring(i, name[0])) : text.substring(i, name[0]);
+            if (!fnName.equalsIgnoreCase("url")) return false;
+            int k = skipSeparators(text, name[0], end);
             if (k < 0 || k >= end || text.charAt(k) != '(') return false;
             int argEnd = matchingParen(text, k + 1, end);
             return argEnd >= 0 && isSafeUrlArgument(text, k + 1, argEnd);
@@ -565,17 +610,6 @@ final class StyleCleaner {
             i++;
         }
         return -1;
-    }
-
-    private boolean matchesName(String value, int from, int end, String name) {
-        int len = name.length();
-        if (from + len > end) return false;
-        for (int k = 0; k < len; k++) {
-            char a = value.charAt(from + k);
-            char b = name.charAt(k);
-            if (a != b && a != Character.toUpperCase(b)) return false;
-        }
-        return true;
     }
 
     /**
