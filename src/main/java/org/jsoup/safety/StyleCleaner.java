@@ -208,9 +208,12 @@ final class StyleCleaner {
         p++; // step past ':'
 
         if (isDangerousProperty(value, nameStart, p - 1)) return; // known script-entry properties, regardless of value
-        boolean safe = referencesAreSafe(value, p, q);
-        if (safe && custom) // a custom property holds arbitrary free text, so scan its whole value as one string
-            safe = freeTextIsSafe(value.substring(p, q));
+        // a custom property (--name) holds arbitrary free text: its value is scanned as one string, so a colon that is
+        // not part of a reference (e.g. "--x: https://example.com" or a time such as "12:00"), a stray quote, or an
+        // at-keyword other than @import is preserved verbatim; only its references decide its fate
+        boolean safe = custom
+            ? freeTextIsSafe(value.substring(p, q))
+            : referencesAreSafe(value, p, q);
         if (safe) append(out, value, start, q);
     }
 
@@ -323,8 +326,6 @@ final class StyleCleaner {
                 continue;
             }
             if (c == '@') return false; // no at-rule (e.g. a buried @import) is valid inside a declaration value
-            if (c == ':' && parenDepth == 0)
-                return false; // a bare ':' outside strings and functions (e.g. a recovered "javascript:" run) is invalid
             if (isIdentStart(c) || c == '-') {
                 int[] name = readName(value, i, end);
                 int nameEnd = name[0];

@@ -193,6 +193,34 @@ public class StyleCleanerTest {
             clean("<div style=\"--foo: url(javascript:alert(1)); color:red\">x</div>"));
     }
 
+    @Test void customPropertyValueColonsArePreserved() {
+        // a custom property holds arbitrary text, split from its name at only the first top-level colon: colons in
+        // the value (times, URL-looking text, function arguments) are never a reason to drop the declaration
+        assertEquals("<div style=\"--foo: a:b; color:red\">x</div>",
+            clean("<div style=\"--foo: a:b; color:red\">x</div>"));
+        assertEquals("<div style=\"--foo: https://example.com/path; color:red\">x</div>",
+            clean("<div style=\"--foo: https://example.com/path; color:red\">x</div>"));
+        assertEquals("<div style=\"--foo: var(--a, red:blue); color:red\">x</div>",
+            clean("<div style=\"--foo: var(--a, red:blue); color:red\">x</div>"));
+        // a non-URL custom property value that merely mentions a colon is kept even with no base URI
+        assertEquals("<div style=\"--foo: 12:00\">x</div>",
+            clean("<div style=\"--foo: 12:00\">x</div>", "", styleSafelist()));
+        // but a genuine reference inside the custom value is still resolved and checked
+        assertEquals("<div style=\" color:red\">x</div>",
+            clean("<div style=\"--foo: url(img/x.png); color:red\">x</div>", "", styleSafelist()));
+    }
+
+    @Test void ordinaryValueProtocolAndTimeTextIsNotTruncated() {
+        // a bare colon outside a url(...) reference cannot fetch anything, so protocol- or time-looking text survives
+        assertEquals("<div style=\"content: http://example.com/not-a-reference;color:red\">x</div>",
+            clean("<div style=\"content: http://example.com/not-a-reference;color:red\">x</div>"));
+        assertEquals("<div style=\"content: 12:00;color:red\">x</div>",
+            clean("<div style=\"content: 12:00;color:red\">x</div>"));
+        // an actual reference in the same declaration is still governed by the URL rules
+        assertEquals("<div style=\"color:red\">x</div>",
+            clean("<div style=\"content: http://x url(javascript:1);color:red\">x</div>"));
+    }
+
     @Test void importReferenceIsChecked() {
         assertEquals("<div style=\"@import url(https://example.com/x.css);color:red\">x</div>",
             clean("<div style=\"@import url(https://example.com/x.css);color:red\">x</div>"));
