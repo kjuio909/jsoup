@@ -42,6 +42,7 @@ import static org.jsoup.internal.SharedConstants.DummyUri;
  */
 public class Cleaner {
     private final Safelist safelist;
+    private final CssSanitizer cssSanitizer;
 
     /**
      Create a new cleaner, that sanitizes documents using the supplied safelist.
@@ -50,6 +51,7 @@ public class Cleaner {
     public Cleaner(Safelist safelist) {
         Validate.notNull(safelist);
         this.safelist = safelist;
+        this.cssSanitizer = new CssSanitizer(safelist);
     }
 
     /**
@@ -234,6 +236,15 @@ public class Cleaner {
                     }
                     if (!cleaned.equals(value))
                         numDiscarded++; // candidates were dropped or normalized
+                    value = cleaned;
+                } else if (CssSanitizer.isStyle(key)) { // clean inline CSS declarations; drop the attribute if none survive
+                    String cleaned = cssSanitizer.clean(sourceTag, sourceEl.baseUri(), value);
+                    if (cleaned == null) {
+                        numDiscarded++;
+                        continue;
+                    }
+                    if (!cleaned.equals(value))
+                        numDiscarded++; // declarations were dropped
                     value = cleaned;
                 } else if (safelist.shouldAbsUrl(sourceTag, key)) { // configured to make absolute urls for this key (href)
                     value = sourceEl.absUrl(key);

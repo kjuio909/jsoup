@@ -76,6 +76,8 @@ public class Safelist {
     private static final TagName AllTag = TagName.valueOf(All);
     private static final String Srcset = "srcset";
     private static final AttributeKey SrcsetKey = AttributeKey.valueOf(Srcset);
+    private static final String Style = "style";
+    private static final AttributeKey StyleKey = AttributeKey.valueOf(Style);
     private final Set<TagName> tagNames; // tags allowed, lower case. e.g. [p, br, span]
     private final Map<TagName, Set<AttributeKey>> attributes; // tag -> attribute[]. allowed attributes [href] for a tag.
     private final Map<TagName, Map<AttributeKey, AttributeValue>> enforcedAttributes; // always set these attribute values
@@ -539,6 +541,8 @@ public class Safelist {
 
         Set<AttributeKey> okSet = attributes.get(tag);
         if (okSet != null && okSet.contains(key)) {
+            if (StyleKey.equals(key))
+                return true; // an inline style attribute is validated declaration by declaration in the Cleaner
             if (protocols.containsKey(tag)) {
                 Map<AttributeKey, Set<Protocol>> attrProts = protocols.get(tag);
                 // ok if not defined protocol; otherwise test. srcset URLs are tested per candidate in the Cleaner.
@@ -714,6 +718,33 @@ public class Safelist {
         Map<AttributeKey, AttributeValue> enforcedSet = enforcedAttributes.get(tag);
         if (enforcedSet != null && enforcedSet.containsKey(SrcsetKey)) return null;
         return !tag.equals(AllTag) ? srcsetProtocols(AllTag) : null;
+    }
+
+    /**
+     Resolves the protocols allowed for external references ({@code url(...)} and {@code @import}) found in
+     an inline {@code style} attribute on the given tag, following the same tag to {@code :all} fallback as
+     the other attribute checks. Returns an empty set when nothing is configured, in which case the
+     {@link Cleaner}'s CSS sanitizer allows HTTP and HTTPS only.
+     */
+    Set<String> styleProtocols(String tagName) {
+        Set<String> allowed = new HashSet<>();
+        collectStyleProtocols(TagName.valueOf(tagName), allowed);
+        if (allowed.isEmpty()) {
+            allowed.add("http");
+            allowed.add("https");
+        }
+        return allowed;
+    }
+
+    private void collectStyleProtocols(TagName tag, Set<String> sink) {
+        Map<AttributeKey, Set<Protocol>> attrProts = protocols.get(tag);
+        if (attrProts != null) {
+            Set<Protocol> styleProts = attrProts.get(StyleKey);
+            if (styleProts != null) {
+                for (Protocol protocol : styleProts) sink.add(protocol.toString());
+            }
+        }
+        if (!tag.equals(AllTag)) collectStyleProtocols(AllTag, sink);
     }
 
     private boolean isSafeSrcsetUrl(Element el, String url, Set<Protocol> protocols) {
@@ -917,6 +948,7 @@ public class Safelist {
     }
 
     private boolean shouldAbsUrl(TagName tag, AttributeKey key) {
+        if (StyleKey.equals(key)) return false; // style is cleaned declaration by declaration, never resolved as one URL
         Set<AttributeKey> allowedAttrs = attributes.get(tag);
         if (allowedAttrs != null && allowedAttrs.contains(key)) {
             Map<AttributeKey, Set<Protocol>> protocolsByAttr = protocols.get(tag);

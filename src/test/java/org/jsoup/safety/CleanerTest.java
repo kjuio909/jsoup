@@ -1090,4 +1090,309 @@ public class CleanerTest {
         assertEquals("<img srcset=\"https://a.example/1 1x, https://b.example/2 300w, https://c.example/3, rel.jpg 2.5x\">",
             clean);
     }
+
+    // ---- inline style attribute sanitizing ----
+
+    private static Safelist styleSafelist(String... protocols) {
+        Safelist safelist = Safelist.relaxed()
+            .addAttributes("div", "style")
+            .addAttributes("p", "style")
+            .addAttributes("span", "style")
+            .addAttributes("img", "style");
+        if (protocols.length > 0) safelist.addProtocols("div", "style", protocols);
+        return safelist;
+    }
+
+    private static Element cleanStyle(String style, Safelist safelist, String baseUri) {
+        Document dirty = Document.createShell(baseUri == null ? "" : baseUri);
+        dirty.body().append("<div style=\"" + style + "\"></div>");
+        Document clean = new Cleaner(safelist).clean(dirty);
+        return clean.expectFirst("div");
+    }
+
+    private static Element cleanStyle(String style, Safelist safelist) {
+        return cleanStyle(style, safelist, "https://example.com/page/");
+    }
+
+    @Test void keepsSafeStyleDeclarationsInOrder() {
+        Safelist safelist = styleSafelist();
+        String style = "color: red; font-size: 14px; margin: 0 5px; font-family: 'Calibri', sans-serif; "
+            + "width: calc(100% - 10px); background: url(https://cdn.example/img.png)";
+        Element div = cleanStyle(style, safelist);
+        assertEquals(style, div.attr("style"));
+    }
+
+    @Test void propertyNameAndFunctionCaseAndWhitespaceDoNotMatter() {
+        Safelist safelist = styleSafelist();
+        assertEquals("BACKGROUND: URL( HTTPS://EXAMPLE.COM/A.PNG )",
+            cleanStyle("BACKGROUND: URL( HTTPS://EXAMPLE.COM/A.PNG )", safelist).attr("style"));
+        assertEquals("   COLOR  : red ; FONT-WEIGHT :  bold  ",
+            cleanStyle("   COLOR  : red ; FONT-WEIGHT :  bold  ", safelist).attr("style"));
+    }
+
+    @Test void dropsOnlyDangerousDeclaration() {
+        Safelist safelist = styleSafelist();
+        Element div = cleanStyle("color:red; background: url(javascript:alert(1)); font-size:14px", safelist);
+        assertEquals("color:red; font-size:14px", div.attr("style"));
+        assertTrue(div.hasAttr("style"));
+        assertFalse(div.html().contains("javascript"));
+    }
+
+    @Test
+    void rejectsScriptingAndUnknownSchemes() {
+        String[] dangerous = {
+            "background:url(javascript:alert(1))",
+            "background:url(JaVaScRiPt:alert(1))",
+            "background:url('javascript:alert(1)')",
+            "background:url(  javascript:alert(1)  )",
+            "background:url(j\ta\nv\rascript:1)",
+            "background:url(j\\61 vascript:alert(1))",
+            "background:url(\\6a avascript:alert(1))",
+            "background:url(java%73cript:alert(1))",
+            "background:url(%6Aavascript:alert(1))",
+            "background:url(vbscript:msgbox(1))",
+            "background:url(data:text/html,<script>)",
+            "background:url(unknownscheme:thing)",
+            "background:url(javascript:)",
+        };
+        Safelist safelist = styleSafelist();
+        for (String style : dangerous) {
+            Element div = cleanStyle(style, safelist);
+            assertFalse(div.hasAttr("style"), "should drop whole style for: " + style);
+            assertFalse(div.outerHtml().toLowerCase().contains("javascript")
+                || div.outerHtml().toLowerCase().contains("vbscript")
+                || div.outerHtml().toLowerCase().contains("unknownscheme"), "leak in: " + style);
+        }
+    }
+
+    @Test void htmlEntitiesCannotHideScheme() {
+        Safelist safelist = styleSafelist();
+        String html = "<div style='background:url(java&#x73;cript:alert(1));color:red'></div>";
+        Document clean = new Cleaner(safelist).clean(Jsoup.parse(html));
+        Element div = clean.expectFirst("div");
+        assertEquals("color:red", div.attr("style"));
+    }
+
+    @Test void dangerousSchemeDoesNotRemoveOtherAttributesOrText() {
+        Safelist safelist = styleSafelist().addAttributes("div", "id", "class", "title");
+        String html = "<div id='keep' class='also' title='hi' style='color:red;background:url(javascript:1)'>Hello</div>";
+        Document clean = new Cleaner(safelist).clean(Jsoup.parse(html));
+        Element div = clean.expectFirst("div");
+        assertEquals("keep", div.id());
+        assertEquals("also", div.className());
+        assertEquals("hi", div.attr("title"));
+        assertEquals("color:red", div.attr("style"));
+        assertEquals("Hello", div.text());
+    }
+
+    @Test void semiInsideStringOrUrlDoesNotSplitDeclaration() {
+        Safelist safelist = styleSafelist();
+        assertEquals("content: 'a; b'; color:red",
+            cleanStyle("content: 'a; b'; color:red", safelist).attr("style"));
+        assertEquals("background: url(https://example.com/a;x.png); color:red",
+            cleanStyle("background: url(https://example.com/a;x.png); color:red", safelist).attr("style"));
+    }
+
+    @Test void malformedSyntaxDropsOnlyBadDeclarationAndNeverThrows() {
+        Safelist safelist = styleSafelist();
+        // repeated separators and a unit with no colon
+        assertEquals("color:red; color:blue",
+            cleanStyle("color:red; ; ; not-a-declaration; color:blue", safelist).attr("style"));
+        // declaration with no value: dropped (the space before the surviving declaration is retained text)
+        assertEquals(" color:red", cleanStyle("color:; color:red", safelist).attr("style"));
+        // unterminated quote: bad unit dropped, following declaration kept
+        assertEquals("color:red; color:blue",
+            cleanStyle("color:red; content: 'unterminated; color:blue", safelist).attr("style"));
+        // unterminated parenthesis in a safe url: bad unit dropped, following declaration kept
+        assertEquals("color:red; color:blue",
+            cleanStyle("color:red; background: url(https://example.com/a.png; color:blue", safelist).attr("style"));
+        // unterminated quote that never recovers: whole tail dropped
+        assertEquals("color:red",
+            cleanStyle("color:red; content: 'unterminated", safelist).attr("style"));
+        // an unterminated quoted url(...) reaching EOF is dropped, neighbors survive (safe or dangerous)
+        assertEquals("color:red",
+            cleanStyle("color:red; background:url('https://example.com/a.png'", safelist).attr("style"));
+        assertEquals("color:red",
+            cleanStyle("color:red; background:url('javascript:1'", safelist).attr("style"));
+        // nested unclosed openers recover independently at each semicolon
+        assertEquals("color:red;color:blue",
+            cleanStyle("color:red; content:'x;color:blue", safelist).attr("style"));
+    }
+
+    @Test void atImportIsCheckedAndScopedToItsDeclaration() {
+        Safelist safelist = styleSafelist();
+        assertEquals("@import url(https://example.com/a.css);color:red",
+            cleanStyle("@import url(https://example.com/a.css);color:red", safelist).attr("style"));
+        assertEquals("@import 'https://example.com/a.css';color:red",
+            cleanStyle("@import 'https://example.com/a.css';color:red", safelist).attr("style"));
+        assertEquals("@IMPORT URL('https://example.com/a.css');color:red",
+            cleanStyle("@IMPORT URL('https://example.com/a.css');color:red", safelist).attr("style"));
+
+        assertEquals("color:red",
+            cleanStyle("@import url(javascript:alert(1));color:red", safelist).attr("style"));
+        assertEquals("color:red",
+            cleanStyle("@import 'javascript:alert(1)';color:red", safelist).attr("style"));
+        // an @import referencing a relative sheet with no base is undeterminable and rejected
+        assertEquals("color:red", cleanStyle("@import url(a.css);color:red", safelist, "").attr("style"));
+    }
+
+    @Test void protocolRelativeAndRelativeReferencesUseDocumentBase() {
+        Safelist safelist = styleSafelist();
+        // with a valid https base, a protocol-relative reference resolves to an allowed scheme
+        assertEquals("background:url(//example.com/a.png);color:red",
+            cleanStyle("background:url(//example.com/a.png);color:red", safelist, "https://example.com/")
+                .attr("style"));
+        // a relative reference is judged against the base and kept verbatim
+        assertEquals("background:url(a.png);color:red",
+            cleanStyle("background:url(a.png);color:red", safelist, "https://example.com/page/")
+                .attr("style"));
+        assertEquals("background:url(/a.png);color:red",
+            cleanStyle("background:url(/a.png);color:red", safelist, "https://example.com/page/")
+                .attr("style"));
+        // without a base the reference is undeterminable and the declaration is rejected
+        assertEquals("color:red",
+            cleanStyle("background:url(a.png);color:red", safelist, "").attr("style"));
+        assertEquals("color:red",
+            cleanStyle("background:url(//evil.com/a.png);color:red", safelist, "").attr("style"));
+        // a protocol-relative reference can never inherit a forbidden scheme
+        assertEquals("color:red",
+            cleanStyle("background:url(//evil.com/a.png);color:red", safelist, "ftp://example.com/")
+                .attr("style"));
+    }
+
+    @Test void preserveRelativeLinksKeepsReferencesButStillBlocksSchemes() {
+        Safelist safelist = styleSafelist().preserveRelativeLinks(true);
+        assertEquals("background:url(a.png);color:red",
+            cleanStyle("background:url(a.png);color:red", safelist, "").attr("style"));
+        assertEquals("background:url(//example.com/a.png);color:red",
+            cleanStyle("background:url(//example.com/a.png);color:red", safelist, "").attr("style"));
+        // a dangerous scheme is still rejected; the safe sibling declaration survives
+        assertEquals("color:red",
+            cleanStyle("background:url(javascript:1);color:red", safelist, "").attr("style"));
+        assertFalse(cleanStyle("background:url(javascript:1)", safelist, "").hasAttr("style"));
+    }
+
+    @Test void dataUrlsOnlyWhenExplicitlyAllowedAndMediaTypeSafe() {
+        String png = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUg==";
+        // data not configured: rejected
+        Safelist noData = styleSafelist();
+        assertEquals("color:red",
+            cleanStyle("background:url(" + png + ");color:red", noData).attr("style"));
+        // data configured and an inert image type: kept
+        Safelist withData = styleSafelist("http", "https", "data");
+        assertEquals("background:url(" + png + ");color:red",
+            cleanStyle("background:url(" + png + ");color:red", withData).attr("style"));
+        // svg can carry script, and html is active content: rejected even with data allowed
+        assertEquals("color:red",
+            cleanStyle("background:url(data:image/svg+xml;base64,PHN2Zz4=);color:red", withData).attr("style"));
+        assertEquals("color:red",
+            cleanStyle("background:url(data:text/html,foo);color:red", withData).attr("style"));
+        // a data URL must carry data
+        assertEquals("color:red", cleanStyle("background:url(data:image/png);color:red", withData).attr("style"));
+    }
+
+    @Test void rejectsLegacyExpressionFunction() {
+        Safelist safelist = styleSafelist();
+        assertEquals("color:red", cleanStyle("width:expression(alert(1));color:red", safelist).attr("style"));
+        assertEquals("color:red", cleanStyle("width:EXPR\\65 SSION(alert(1));color:red", safelist).attr("style"));
+        // the word inside a quoted string is inert text
+        assertEquals("content: 'expression(1)';color:red",
+            cleanStyle("content: 'expression(1)';color:red", safelist).attr("style"));
+    }
+
+    @Test void commentsAreScannedButNotParsedAsDeclarations() {
+        Safelist safelist = styleSafelist();
+        // a benign comment is preserved and does not invalidate the declaration
+        assertEquals("color:red; /* a note */ color:blue",
+            cleanStyle("color:red; /* a note */ color:blue", safelist).attr("style"));
+        // a safe url() mentioned in a comment is fine and the comment is preserved verbatim
+        assertEquals("color:red; /* url(https://example.com/a.png) */ color:blue",
+            cleanStyle("color:red; /* url(https://example.com/a.png) */ color:blue", safelist).attr("style"));
+        // a dangerous reference hidden in a comment is excised, neighbors survive and text isn't parsed
+        Element div = cleanStyle("color:red; /* x url(javascript:1) */ color:blue", safelist);
+        assertEquals("color:red;  color:blue", div.attr("style"));
+        assertFalse(div.outerHtml().contains("javascript"));
+    }
+
+    @Test void styleCleaningIsValidatedByIsValid() {
+        Safelist safelist = styleSafelist();
+        assertTrue(Cleaner.isValid("<div style='color:red'>x</div>", safelist));
+        assertFalse(Cleaner.isValid("<div style='color:red;background:url(javascript:1)'>x</div>", safelist));
+        assertFalse(Cleaner.isValid("<div style='background:url(javascript:1)'>x</div>", safelist));
+        assertFalse(Cleaner.isValid("<div style='not-a-declaration'>x</div>", safelist));
+    }
+
+    @Test void styleCleaningIsIdempotentAndDoesNotMutateInput() {
+        Safelist safelist = styleSafelist();
+        String html = "<p style='color:red;background:url(javascript:1)'>a</p>"
+            + "<div style='background:url(https://example.com/a.png); color:blue; width:calc(10% - 1px)'>b</div>"
+            + "<span style='font-size:14px;; ;'>c</span>";
+        Document dirty = Jsoup.parse(html, "https://example.com/");
+        Cleaner cleaner = new Cleaner(safelist);
+        Document once = cleaner.clean(dirty);
+        Document twice = cleaner.clean(once);
+        assertEquals(once.body().html(), twice.body().html());
+
+        // input is untouched, holds the rejected URL, and is independent of the returned copy
+        assertTrue(dirty.body().html().contains("javascript:1"));
+        once.expectFirst("p").attr("style", "color:green");
+        assertTrue(dirty.body().html().contains("javascript:1"));
+
+        // no rejected URL survives in serialization or traversal
+        assertFalse(once.toString().contains("javascript"));
+        for (Element el : once.getAllElements()) {
+            assertFalse(el.attr("style").contains("javascript"));
+        }
+    }
+
+    @Test void multipleElementsAreCleanedIndependentlyWithStableOrder() {
+        Safelist safelist = styleSafelist();
+        String html = "<div style='color:red;background:url(javascript:1)'>1</div>"
+            + "<div style='color:green'>2</div>"
+            + "<div style='background:url(https://example.com/a.png);color:blue'>3</div>";
+        Document clean = new Cleaner(safelist).clean(Jsoup.parse(html));
+        java.util.List<Element> divs = clean.select("div");
+        assertEquals(3, divs.size());
+        assertEquals("color:red", divs.get(0).attr("style"));
+        assertEquals("color:green", divs.get(1).attr("style"));
+        assertEquals("background:url(https://example.com/a.png);color:blue", divs.get(2).attr("style"));
+    }
+
+    @Test void styleAttributeRemovedEntirelyWhenNotAllowed() {
+        Safelist safelist = Safelist.relaxed(); // style not on any tag
+        String clean = Jsoup.clean("<div style='color:red;background:url(javascript:1)'>x</div>", safelist);
+        assertEquals("<div>x</div>", TextUtil.stripNewlines(clean));
+    }
+
+    @Test void styleProtocolsCanBeConfiguredPerTagAndViaAll() {
+        Safelist perTag = styleSafelist("http");
+        // https no longer allowed for div style
+        assertEquals("color:red",
+            cleanStyle("background:url(https://example.com/a.png);color:red", perTag).attr("style"));
+        assertEquals("background:url(http://example.com/a.png);color:red",
+            cleanStyle("background:url(http://example.com/a.png);color:red", perTag).attr("style"));
+
+        Safelist viaAll = Safelist.relaxed()
+            .addAttributes(":all", "style")
+            .addProtocols(":all", "style", "http", "https");
+        Element p = cleanStyleOn("p", "background:url(https://example.com/a.png);color:red", viaAll);
+        assertEquals("background:url(https://example.com/a.png);color:red", p.attr("style"));
+    }
+
+    private static Element cleanStyleOn(String tag, String style, Safelist safelist) {
+        Document dirty = Document.createShell("https://example.com/");
+        dirty.body().append("<" + tag + " style=\"" + style + "\"></" + tag + ">");
+        return new Cleaner(safelist).clean(dirty).expectFirst(tag);
+    }
+
+    @Test void existingUrlAttributesRemainFilteredWhenStyleIsAllowed() {
+        Safelist safelist = styleSafelist();
+        String html = "<a href='javascript:alert(1)' style='color:red'>x</a>"
+            + "<img src='http://example.com/a.png' style='background:url(https://example.com/b.png)'>";
+        String clean = Jsoup.clean(html, "https://example.com/", safelist);
+        assertFalse(clean.contains("javascript"));
+        assertTrue(clean.contains("<a>x</a>")); // the unsafe href is removed while the anchor text stays
+        assertTrue(clean.contains("src=\"http://example.com/a.png\""));
+        assertTrue(clean.contains("style=\"background:url(https://example.com/b.png)\""));
+    }
 }
