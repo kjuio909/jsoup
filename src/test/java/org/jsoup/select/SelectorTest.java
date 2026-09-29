@@ -789,6 +789,122 @@ public class SelectorTest {
         assertThrows(Selector.SelectorParseException.class, () -> QueryParser.parse("a:has(b"));
     }
 
+    @Test public void testHasInvalidSelectorDoesNotDegrade() {
+        // malformed :has syntax is rejected outright: no silent all-select, ignored :has, or partial branch results
+        assertThrows(Selector.SelectorParseException.class, () -> QueryParser.parse("div:has(span >)"));
+        assertThrows(Selector.SelectorParseException.class, () -> QueryParser.parse("div:has(>)"));
+        assertThrows(Selector.SelectorParseException.class, () -> QueryParser.parse("div:has(,span)"));
+        assertThrows(Selector.SelectorParseException.class, () -> QueryParser.parse("div:has(span,)"));
+        assertThrows(Selector.SelectorParseException.class, () -> QueryParser.parse("div:has(span >> p)"));
+        // one invalid comma branch invalidates the whole selector -- other branches must not be returned
+        assertThrows(Selector.SelectorParseException.class, () -> QueryParser.parse("div:has(span, >>)"));
+
+        // a parse exception is the existing CSS exception type and leaves the document fully selectable
+        Document doc = Jsoup.parse("<div id=ok><p id=p>hi</p></div>");
+        String before = doc.html();
+        Selector.SelectorParseException err = assertThrows(Selector.SelectorParseException.class,
+            () -> doc.select("div:has(("));
+        assertTrue(err instanceof IllegalStateException); // SelectorParseException extends this existing type
+        assertSelectedIds(doc.select("div:has(p)"), "ok");
+        assertEquals(before, doc.html());
+    }
+
+    @Test public void testHasEscapesAndParsedValues() {
+        // inner relations match against the parsed DOM values: CSS escapes and HTML entity decoding apply first
+        Document doc = Jsoup.parse(
+            "<div id=d1 class='weird class'><p id=p1></p></div>" +
+            "<div id=d2 data-v='hello world'><i id=i1></i></div>" +
+            "<div id='a:b' class='c:d'><b id=b1></b></div>" +
+            "<div id=d3 title='x &amp; y'><span id=s3></span></div>");
+        assertSelectedIds(doc.select("div:has(p).weird.class"), "d1");
+        assertSelectedIds(doc.select("div:has(> i)[data-v='hello world']"), "d2");
+        assertSelectedIds(doc.select("div:has(> b)#a\\:b"), "a:b");
+        assertSelectedIds(doc.select("div:has(> b).c\\:d"), "a:b");
+        assertSelectedIds(doc.select("div:has(span)[title='x & y']"), "d3");
+
+        Document escaped = Jsoup.parse("<div id=x class='a.b'><span id=s></span></div>");
+        assertSelectedIds(escaped.select("div:has(span).a\\.b"), "x");
+    }
+
+    @Test public void testHasEmptyAndNestedOnly() {
+        // empty documents and no-match inputs return a normal, traversable empty result
+        Document empty = Jsoup.parse("");
+        Elements none = empty.select("div:has(p)");
+        assertNotNull(none);
+        assertTrue(none.isEmpty());
+        assertEquals(0, none.parents().size());
+        assertEquals(0, none.eachText().size());
+
+        // a match that exists only through a nested :has level returns the outer element
+        Document nested = Jsoup.parse("<div id=z><article id=a><h1 id=h></h1></article></div>");
+        assertSelectedIds(nested.select("div:has(article:has(h1))"), "z");
+        // and a nested condition that does not hold yields a normal empty result
+        Document nestedMiss = Jsoup.parse("<section id=s></section>");
+        Elements miss = nestedMiss.select("section:has(div:has(p))");
+        assertTrue(miss.isEmpty());
+        assertEquals(0, miss.parents().size());
+    }
+
+    @Test public void testHasUsesParsedTableRelations() {
+        // relations follow the parsed tree (including foster parenting), never the raw tag string
+        Document doc = Jsoup.parse(
+            "<table id=t><tr id=row><td id=cell><p id=tp>x</p></td></tr><span id=fostered></span></table>");
+        assertSelectedIds(doc.select("td:has(p)"), "cell");
+        assertSelectedIds(doc.select("tr:has(td:has(p))"), "row");
+        assertSelectedIds(doc.select("table:has(tbody:has(tr:has(td)))"), "t");
+        Element span = doc.getElementById("fostered");
+        assertNotNull(span);
+        assertFalse(span.parent().tagName().equals("table")); // foster-parented out of the table
+        // the relation is evaluated against the actual post-foster-parent tree
+        Element spanParent = span.parent();
+        assertEquals(spanParent, doc.selectFirst(":has(> #fostered)"));
+    }
+
+    @Test public void testHasNoSharedStateAcrossDocsAndCalls() {
+        // a compiled evaluator is reusable across documents; no per-query state leaks between calls
+        Evaluator eval = QueryParser.parse("div:has(> p.q)");
+        Document one = Jsoup.parse("<div id=da><p class=q></p></div>");
+        Document two = Jsoup.parse("<div id=db></div>");
+        assertSelectedIds(one.select(eval), "da");
+        assertTrue(two.select(eval).isEmpty());
+        assertSelectedIds(one.select(eval), "da");
+
+        // edits made after an earlier query are reflected in the next one
+        Document mut = Jsoup.parse("<div id=a><p id=p></p></div><div id=b></div>");
+        assertSelectedIds(mut.select("div:has(> p)"), "a");
+        mut.getElementById("b").appendElement("p").attr("id", "p2");
+        assertSelectedIds(mut.select("div:has(> p)"), "a", "b");
+    }
+
+    @Test public void testHasWildcardAndNotConsistency() {
+        Document doc = Jsoup.parse("<div id=a><span id=s></span></div><div id=b></div>");
+        // * follows normal selector rules: any descendant element, not the candidate itself
+        assertSelectedIds(doc.select("div:has(*)"), "a");
+        // :not combines by ordinary rules -- :not(span) needs a non-span descendant
+        assertTrue(doc.select("div:has(:not(span))").isEmpty());
+        Document two = Jsoup.parse("<div id=a><span></span><i id=i></i></div>");
+        assertSelectedIds(two.select("div:has(:not(span))"), "a");
+        // negation of the relation itself
+        Document links = Jsoup.parse("<ul><li id=a><a></a></li><li id=b>x</li></ul>");
+        assertSelectedIds(links.select("li:not(:has(a))"), "b");
+    }
+
+    @Test public void testHasDocumentOrderIdempotentAndStable() {
+        Document doc = Jsoup.parse(
+            "<div id=a class=box><div id=b class=box><div id=c class=box><span id=x></span></div></div></div>");
+        Elements first = doc.select(".box:has(span)");
+        Elements second = doc.select(".box:has(span)");
+        assertSelectedIds(first, "a", "b", "c"); // parents precede their children
+        assertSelectedIds(second, "a", "b", "c");
+
+        // selection never mutates the document, and serialize/reparse yields the same results
+        String html = doc.html();
+        doc.select(".box:has(span, .nope):not(.z) > span");
+        assertEquals(html, doc.html());
+        Document reparsed = Jsoup.parse(html);
+        assertSelectedIds(reparsed.select(".box:has(span)"), "a", "b", "c");
+    }
+
     @Test public void testScope() {
         Document doc = Jsoup.parse("<div id=d><p id=p><span></span></p></div>");
         Element div = doc.selectFirst("div");
