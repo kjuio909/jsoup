@@ -63,8 +63,18 @@ public class StyleSheetCleanerTest {
         assertEquals("<p>x</p>", org.jsoup.TextUtil.stripNewlines(body("p{background:url(javascript:1)}")));
     }
 
-    @Test void keepsWhitespaceOnlyStylesheet() {
-        assertEquals("  \n ", sheet("  \n "));
+    @Test void removesWhitespaceCommentOrEmptyOnlyStylesheet() {
+        // whitespace, comments, empty rules, or a wholly empty element carry no complete safe rule or declaration,
+        // so the whole <style> element (its text and attributes) is removed, leaving no empty placeholder
+        assertNull(sheet("  \n "));
+        assertNull(sheet(""));
+        assertNull(sheet("/* only a comment */"));
+        assertNull(sheet("p{}"));
+        assertEquals("<p>x</p>", org.jsoup.TextUtil.stripNewlines(body("  \n ")));
+        assertEquals("<p>x</p>", org.jsoup.TextUtil.stripNewlines(body("/* c */")));
+        Document empty = cleanDoc("<style></style><p>x</p>", Base, sheetSafelist());
+        assertNull(empty.selectFirst("style"));
+        assertEquals("<p>x</p>", org.jsoup.TextUtil.stripNewlines(empty.body().html()));
     }
 
     @Test void policyDisallowingStyleStillRemovesWholeElement() {
@@ -324,5 +334,27 @@ public class StyleSheetCleanerTest {
         assertEquals("p{color:red;}", style.data());
         // the cleaned document is fully isolated from the parsed input
         assertNotSame(dirty.body().selectFirst("style"), style);
+    }
+
+    @Test void callerParsedTextNodeStyleContentIsFilteredOrRemoved() {
+        // a document the caller parsed (e.g. the XML parser) or built by hand carries stylesheet text as an ordinary
+        // TextNode rather than the HTML parser's DataNode; it must be filtered just the same when style is allowed,
+        // and never transferred to the parent when style is disallowed
+        String html = "<html><body><style>p{color:red;background:url(javascript:1)}</style><p>x</p></body></html>";
+        Document xml = Jsoup.parse(html, Base, org.jsoup.parser.Parser.xmlParser());
+        String before = xml.body().html();
+        Document clean = new Cleaner(sheetSafelist()).clean(xml);
+        // the caller's parsed document is untouched
+        assertEquals(before, xml.body().html());
+        Element style = clean.selectFirst("style");
+        assertNotNull(style);
+        assertEquals("p{color:red;}", style.data());
+        assertFalse(clean.body().html().contains("javascript"));
+
+        Document gone = new Cleaner(Safelist.relaxed())
+            .clean(Jsoup.parse(html, Base, org.jsoup.parser.Parser.xmlParser()));
+        assertNull(gone.selectFirst("style"));
+        assertEquals("x", gone.body().selectFirst("p").text());
+        assertFalse(gone.body().html().contains("color:red"));
     }
 }

@@ -169,8 +169,9 @@ public class Cleaner {
         private int numDiscarded = 0;
         private final Element root;
         private Element destination; // current element to append nodes to
-        // style elements whose stylesheet data nodes were all rejected are removed at their tail; an element with at
-        // least one surviving data node is kept, mirroring an attribute whose value still has safe declarations
+        // style elements whose stylesheet text was all rejected are removed at their tail; an element with at least
+        // one surviving text node is kept, mirroring an attribute whose value still has safe declarations. An empty
+        // style element with no text nodes at all is removed at its tail as well (no complete rule or declaration).
         private final Set<Element> rejectedStyleElements = new HashSet<>();
         private final Set<Element> keptStyleElements = new HashSet<>();
 
@@ -195,27 +196,48 @@ public class Cleaner {
                 }
             } else if (source instanceof TextNode) {
                 TextNode sourceText = (TextNode) source;
-                TextNode destText = new TextNode(sourceText.getWholeText());
-                destination.appendChild(destText);
+                Node parentNode = source.parent();
+                if (parentNode instanceof Element && ((Element) parentNode).normalName().equals("style")) {
+                    // stylesheet text can reach the tree as a DataNode (the HTML parser's RAWTEXT state) or as an
+                    // ordinary TextNode (an XML parser, or a tree built by the caller); either way it is not document
+                    // text. A <style> the policy allows is cleaned rule by rule here, exactly like its DataNode form
+                    Element parentEl = (Element) parentNode;
+                    if (safelist.isSafeTag(parentEl.normalName())) {
+                        appendStyleText(parentEl, sourceText.getWholeText());
+                    } else { // a disallowed <style> is removed with its text, never merged into the parent's output
+                        numDiscarded++;
+                    }
+                } else {
+                    TextNode destText = new TextNode(sourceText.getWholeText());
+                    destination.appendChild(destText);
+                }
             } else if (source instanceof DataNode && safelist.isSafeTag(source.parent().normalName())) {
                 DataNode sourceData = (DataNode) source;
                 String data = sourceData.getWholeData();
                 Node parent = source.parent();
                 if (parent.normalName().equals("style")) { // an allowed <style> element: clean its stylesheet text
-                    String cleaned = safelist.cleanStyleSheet(parent.normalName(), (Element) parent, data);
-                    if (cleaned == null) { // this data node's rules were all invalid
-                        numDiscarded++;
-                        rejectedStyleElements.add(destination);
-                    } else {
-                        if (!cleaned.equals(data)) numDiscarded++; // rules or declarations were dropped/normalized
-                        keptStyleElements.add(destination);
-                        destination.appendChild(new DataNode(cleaned));
-                    }
+                    appendStyleText((Element) parent, data);
                 } else {
                     destination.appendChild(new DataNode(data));
                 }
             } else { // else, we don't care about comments, xml proc instructions, etc
                 numDiscarded++;
+            }
+        }
+
+        /**
+         Cleans one stylesheet text node of an allowed {@code <style>} element, and appends the cleaned data node to
+         the destination; when none of its rules survive the whole element is marked for removal at its tail.
+         */
+        private void appendStyleText(Element parent, String data) {
+            String cleaned = safelist.cleanStyleSheet(parent.normalName(), parent, data);
+            if (cleaned == null) { // this text node's rules were all invalid
+                numDiscarded++;
+                rejectedStyleElements.add(destination);
+            } else {
+                if (!cleaned.equals(data)) numDiscarded++; // rules or declarations were dropped/normalized
+                keptStyleElements.add(destination);
+                destination.appendChild(new DataNode(cleaned));
             }
         }
 
@@ -225,7 +247,13 @@ public class Cleaner {
                 destination = destination.parent(); // would have descended, so pop destination stack
                 boolean rejected = rejectedStyleElements.remove(self);
                 boolean kept = keptStyleElements.remove(self);
-                if (rejected && !kept) self.remove(); // remove a <style> element whose content was wholly invalid
+                // remove a <style> element whose content was wholly invalid, or that carried no stylesheet text at
+                // all (an empty element): neither leaves a complete safe rule, so no empty placeholder may remain. A
+                // rejected text node already counted itself; an empty element counts once so isValid matches clean
+                if (!kept && (rejected || self.normalName().equals("style"))) {
+                    self.remove();
+                    if (!rejected) numDiscarded++;
+                }
             }
         }
     }

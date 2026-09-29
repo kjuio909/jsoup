@@ -54,11 +54,12 @@ final class StyleSheetCleaner {
     }
 
     private String cleanSheet(String css) {
-        if (StringUtil.isBlank(css)) return css; // no rules at all: keep the element as-is
         int[] match = sc.parenMatches(css); // every parenthesis's mate, computed once and shared by every scope
         int[] opens = new int[css.length()]; // the per-scope open stack; block boundaries always reset its depth
         StringBuilder out = StringUtil.borrowBuilder();
         process(css, 0, css.length(), 0, match, opens, out);
+        // whitespace, comments, and empty rules yield no complete rule or declaration: return null so the caller
+        // removes the whole <style> element rather than leave an empty placeholder behind
         return out.length() == 0 ? null : StringUtil.releaseBuilder(out);
     }
 
