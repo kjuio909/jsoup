@@ -109,9 +109,13 @@ final class StyleSheetCleaner {
                 ruleStart = close >= 0 ? close + 1 : end;
                 i = ruleStart;
                 continue;
-            } else if (c == '}' && parenDepth == 0) {
-                // a stray '}' closes no block opened in this scope: validate the prelude before it as a statement
-                emitStatement(css, ruleStart, i, false, out);
+            } else if (c == '}' && (parenDepth == 0 || match[opens[parenDepth - 1]] < 0
+                || match[opens[parenDepth - 1]] >= end)) {
+                // a stray '}', or a '}' after an unclosed function (the same browser-style recovery boundary that
+                // matchingBrace honors inside a block), bounds the statement before it. That statement is emitted as
+                // semicolon-terminated so a surviving statement is separated from the following rule and cannot
+                // glue onto it (an orphan '}' itself is never copied into the output)
+                emitStatement(css, ruleStart, i, true, out);
                 parenDepth = 0;
                 ruleStart = i + 1;
             }
@@ -151,8 +155,20 @@ final class StyleSheetCleaner {
         out.append(body);
         StringUtil.releaseBuilderVoid(body);
         // a block whose '}' was lost (e.g. swallowed by an unterminated comment) is closed here, exactly as a
-        // browser closes it at EOF, so the output never carries an orphan opening brace and stays idempotent
+        // browser closes it at EOF, so the output never carries an orphan opening brace and stays idempotent. A
+        // separator first guards against a body that ends in a lone backslash, which would otherwise escape the
+        // synthesized '}' ('\}' is literal text) and leave the block open on the next clean, appending another
+        // '}' forever.
+        if (endsWithEscapingBackslash(out, out.length())) out.append(' ');
         out.append('}');
+    }
+
+    /** Tests whether {@code s[0, end)} ends in an odd run of backslashes, so an immediately appended separator is escaped. */
+    private static boolean endsWithEscapingBackslash(CharSequence s, int end) {
+        int k = end - 1;
+        int run = 0;
+        while (k >= 0 && s.charAt(k) == '\\') { run++; k--; }
+        return (run & 1) == 1;
     }
 
     /**
@@ -217,6 +233,11 @@ final class StyleSheetCleaner {
         }
         if (safe) {
             out.append(css, start, keptEnd);
+            // a separator we synthesize (a source '}' acting as recovery boundary, or a source ';' following a
+            // trimmed-away run of whitespace) must not glue onto a body that ends in a lone backslash, or it would
+            // be emitted as an escaped '\;'/literal text and vanish on the next clean; a separator space first keeps
+            // the terminator real and the output idempotent
+            if (terminated && endsWithEscapingBackslash(css, keptEnd)) out.append(' ');
             if (terminated) out.append(';');
         }
     }

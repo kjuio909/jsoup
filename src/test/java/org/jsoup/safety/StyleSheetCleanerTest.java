@@ -217,6 +217,39 @@ public class StyleSheetCleanerTest {
         assertNull(sheet("{{{}}}"));
     }
 
+    @Test void recoveryBraceKeepsSurvivingStatementSeparatedFromNextRule() {
+        // a stray '}' bounds the statement before it; a surviving statement gains a real separator so it cannot glue
+        // onto the following rule (the output must stay a fixed point, not collapse on a second clean)
+        assertEquals("@media;@media screen{p{color:red}}",
+            sheet("@media}}@media screen{p{color:red}}"));
+        assertEquals("@media screen;p{color:red}", sheet("@media screen}}p{color:red}"));
+        // a '}' after an unclosed top-level function is the same browser-style recovery boundary as inside a block:
+        // the malformed prelude/declaration invalidates only itself and the rule after still parses independently
+        // (previously the unclosed function swallowed the '}' and the following rule, so the whole sheet was lost)
+        assertEquals("p{color:red}", sheet("a:url(oops}p{color:red}"));
+        // the orphan '}' itself is never copied into the output (no empty rule, no stray brace)
+        assertEquals("@media screen;", idempotent("@media screen}}"));
+    }
+
+    @Test void synthesizedTerminatorIsNotEscapedByATrailingBackslash() {
+        // a block closed at EOF whose body ends in a lone backslash: the synthesized '}' must be a real brace, not an
+        // escaped '\}', or a second clean would append another '}' forever
+        assertEquals("a { color:red\\ }", idempotent("a { color:red\\"));
+        assertEquals("@media screen { p{color:red}}", idempotent("@media screen { p{color:red}\\"));
+        // a statement recovered at a stray '}' and a declaration terminated by ';' get a separator before their ';'/
+        // '}' when the kept text ends in a lone backslash, so the terminator survives a second clean
+        assertEquals("@font-face\\ ;p{color:red}", idempotent("@font-face\\ }p{color:red}"));
+        assertEquals("p{color:red\\ ;color:blue}", idempotent("p{color:red\\ ;color:blue}"));
+    }
+
+    // cleans twice and asserts the result is already stable, returning the once-cleaned sheet text
+    private static String idempotent(String css) {
+        String once = sheet(css);
+        String again = once == null ? null : sheet(once);
+        assertEquals(once, again, "sheet must be a fixed point of cleaning: <" + css + ">");
+        return once;
+    }
+
     @Test void multipleStyleSheetsAreIndependent() {
         String html = "<style>p{color:red;background:url(javascript:1)}</style>"
             + "<style>b{color:blue}</style><p>x</p>";
