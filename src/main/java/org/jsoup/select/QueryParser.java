@@ -30,6 +30,7 @@ public class QueryParser implements AutoCloseable {
     private final TokenQueue tq;
     private final String query;
     private boolean inNodeContext; // ::comment:contains should act on node value, vs element text
+    private int relativeDepth; // >0 while parsing the relative selector list inside a :has()
 
     /**
      * Create a new QueryParser.
@@ -97,13 +98,17 @@ public class QueryParser implements AutoCloseable {
         tq.consumeWhitespace();
 
         Evaluator left;
+        boolean relativeBare = false; // true for a bare branch of a :has() relative list (no leading combinator / :scope)
         if (tq.matchesAny(Combinators)) {
             // e.g. query is "> div"; left side is root element
             left = new StructuralEvaluator.Root();
         } else {
             left = parseSimpleSequence();
+            if (relativeDepth > 0 && !containsScope(left))
+                relativeBare = true; // the leftmost step may not land on the scope element itself
         }
 
+        boolean firstCombinator = true;
         while (true) {
             char combinator = 0;
             if (tq.consumeWhitespace())
@@ -115,7 +120,8 @@ public class QueryParser implements AutoCloseable {
 
             if (combinator != 0) {
                 Evaluator right = parseSimpleSequence();
-                left = combinator(left, combinator, right);
+                left = combinator(left, combinator, right, relativeBare && firstCombinator);
+                firstCombinator = false;
             } else {
                 break;
             }
@@ -149,14 +155,21 @@ public class QueryParser implements AutoCloseable {
     }
 
     static Evaluator combinator(Evaluator left, char combinator, Evaluator right) {
+        return combinator(left, combinator, right, false);
+    }
+
+    static Evaluator combinator(Evaluator left, char combinator, Evaluator right, boolean strictRoot) {
         switch (combinator) {
             case '>':
                 ImmediateParentRun run = left instanceof ImmediateParentRun ?
                     (ImmediateParentRun) left : new ImmediateParentRun(left);
                 run.add(right);
+                if (strictRoot) run.strictRoot = true; // leftmost step may not land on the :has() scope
                 return run;
             case ' ':
-                return and(new StructuralEvaluator.Ancestor(left), right);
+                StructuralEvaluator.Ancestor ancestor = new StructuralEvaluator.Ancestor(left);
+                if (strictRoot) ancestor.strictRoot = true; // leftmost step may not land on the :has() scope
+                return and(ancestor, right);
             case '+':
                 return and(new StructuralEvaluator.ImmediatePreviousSibling(left), right);
             case '~':
@@ -572,12 +585,24 @@ public class QueryParser implements AutoCloseable {
 
     // pseudo selector :has(el)
     private Evaluator has() {
-        return parseNested(StructuralEvaluator.Has::new, ":has() must have a selector");
+        int savedDepth = relativeDepth;
+        relativeDepth = savedDepth + 1; // :has() takes a relative selector list, anchored to each candidate
+        try {
+            return parseNested(StructuralEvaluator.Has::new, ":has() must have a selector");
+        } finally {
+            relativeDepth = savedDepth;
+        }
     }
 
     // pseudo selector :is()
     private Evaluator is() {
-        return parseNested(StructuralEvaluator.Is::new, ":is() must have a selector");
+        int savedDepth = relativeDepth;
+        relativeDepth = 0; // :is() takes an absolute selector list; it does not inherit :has()'s relative anchor
+        try {
+            return parseNested(StructuralEvaluator.Is::new, ":is() must have a selector");
+        } finally {
+            relativeDepth = savedDepth;
+        }
     }
 
     private Evaluator parseNested(Function<Evaluator, Evaluator> func, String err) {
@@ -585,6 +610,21 @@ public class QueryParser implements AutoCloseable {
         Evaluator eval = parseSelectorGroup();
         Validate.isTrue(tq.matchChomp(')'), err);
         return func.apply(eval);
+    }
+
+    /** Tests whether a branch's leftmost compound explicitly supplies its own {@code :scope} anchor (e.g.
+     *  {@code :scope > p} or {@code :scope:not(.x)}), so the implicit relative descendant anchor is not duplicated.
+     *  A :scope buried inside an :is()/:not() filter is a condition, not the chain anchor, and returns false. */
+    private static boolean containsScope(Evaluator eval) {
+        if (eval instanceof StructuralEvaluator.Scope)
+            return true;
+        if (eval instanceof CombiningEvaluator.And) {
+            for (Evaluator inner : ((CombiningEvaluator.And) eval).evaluators) {
+                if (containsScope(inner))
+                    return true;
+            }
+        }
+        return false;
     }
 
     // pseudo selector :contains(text), containsOwn(text)

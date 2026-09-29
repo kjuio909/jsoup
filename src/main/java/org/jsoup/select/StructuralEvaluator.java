@@ -331,6 +331,9 @@ abstract class StructuralEvaluator extends Evaluator {
      Any Ancestor (i.e., ascending parent chain.).
      */
     static class Ancestor extends StructuralEvaluator {
+        boolean strictRoot; // when true, the leftmost compound may match a strict descendant of root only -- it cannot
+                            // match the :has() scope element itself (an implicit ":scope " relative anchor)
+
         public Ancestor(Evaluator evaluator) {
             super(evaluator);
         }
@@ -341,8 +344,11 @@ abstract class StructuralEvaluator extends Evaluator {
                 return false;
 
             for (Node parent = node.parent(); parent != null; parent = parent.parent()) {
-                if (memoMatches(root, parent))
+                if (memoMatches(root, parent)) {
+                    if (strictRoot && parent == root)
+                        return false; // the scope element itself cannot be the leftmost relative match
                     return true;
+                }
                 if (parent == root)
                     break;
             }
@@ -367,6 +373,7 @@ abstract class StructuralEvaluator extends Evaluator {
     static class ImmediateParentRun extends StructuralEvaluator {
         final ArrayList<Evaluator> evaluators = new ArrayList<>();
         int cost = 2;
+        boolean strictRoot; // when true, the leftmost step may not land on the :has() scope element itself
 
         public ImmediateParentRun(Evaluator evaluator) {
             super(evaluator);
@@ -387,6 +394,8 @@ abstract class StructuralEvaluator extends Evaluator {
             for (int i = evaluators.size() -1; i >= 0; --i) {
                 if (node == null)
                     return false;
+                if (strictRoot && node == root)
+                    return false; // a strict relative chain can never pass through or land on the scope element
                 Evaluator eval = evaluators.get(i);
                 if (!eval.matches(root, node))
                     return false;

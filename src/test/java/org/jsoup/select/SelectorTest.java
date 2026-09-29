@@ -789,6 +789,89 @@ public class SelectorTest {
         assertThrows(Selector.SelectorParseException.class, () -> QueryParser.parse("a:has(b"));
     }
 
+    @Test public void testHasRelativeScopeExcludesSelf() {
+        // a relative selector in :has() is implicitly ":scope ...", so the tested element itself never satisfies
+        // its own descendant or child condition -- matches are strict descendants (or following siblings) only
+        Document doc = Jsoup.parse(
+            "<div id=A><p><a></a></p></div>" +
+            "<div id=B><a></a></div>" +
+            "<div id=C><div id=D><a></a></div></div>" +
+            "<div id=E><div id=F><p></p></div></div>");
+
+        // * is a strict descendant, so a direct child of the scope cannot be the leftmost match
+        assertSelectedIds(doc.select("div:has(* > a)"), "A", "C");
+        assertSelectedIds(doc.select("div:has(* a)"), "A", "C");
+        assertSelectedIds(doc.select("div:has(> * > a)"), "A", "C");
+
+        // plain descendant chains likewise stop above the scope
+        assertSelectedIds(doc.select("div:has(div p)"), "E");
+        assertSelectedIds(doc.select("div:has(div a)"), "C");
+
+        // the scope may still match through strict descendants even several levels deep; the body itself matches the
+        // body-scoped query (it has no id), while its descendant containers are selected explicitly
+        Elements bodyMatch = doc.select("body:has(* a)");
+        assertEquals(1, bodyMatch.size());
+        assertEquals("body", bodyMatch.first().tagName());
+        assertSelectedIds(doc.select("body *:has(* a)"), "A", "C");
+
+        // an explicit leading > keeps the direct-child semantics and is unaffected
+        assertSelectedIds(doc.select("div:has(> a)"), "B", "D");
+        assertSelectedIds(doc.select("div:has(> p)"), "A", "F");
+
+        // a wildcard-only condition still matches any descendant, but not a childless element
+        Document leaf = Jsoup.parse("<div id=empty></div><div id=full><p></p></div>");
+        assertSelectedIds(leaf.select("div:has(*)"), "full");
+        assertSelectedIds(leaf.select("div:has(> *)"), "full");
+    }
+
+    @Test public void testHasIsIsAbsolute() {
+        // unlike :has(), an :is() nested inside :has() takes an absolute selector list; its leftmost compound may
+        // resolve against the scope element itself
+        Document doc = Jsoup.parse(
+            "<div id=A><p><a></a></p></div>" +
+            "<div id=B><a></a></div>" +
+            "<div id=C><div id=D><a></a></div></div>");
+        assertSelectedIds(doc.select("div:has(:is(a))"), "A", "B", "C", "D");
+        assertSelectedIds(doc.select("div:has(:is(* > a))"), "A", "B", "C", "D");
+        assertSelectedIds(doc.select("div:has(:is(p a))"), "A");
+    }
+
+    @Test public void testHasRelativeScopeIdempotent() {
+        // repeated selections return the same elements in the same order and never mutate the document
+        Document doc = Jsoup.parse(
+            "<div id=A><p><a></a></p></div>" +
+            "<div id=B><a></a></div>" +
+            "<div id=C><div id=D><a></a></div></div>");
+        String html = doc.html();
+        Elements r1 = doc.select("div:has(* a), div:has(> a)");
+        Elements r2 = doc.select("div:has(* a), div:has(> a)");
+        assertEquals(r1.eachAttr("id"), r2.eachAttr("id"));
+        assertSelectedIds(r1, "A", "B", "C", "D");
+        assertEquals(html, doc.html());
+
+        // a compiled evaluator reused across documents keeps no cross-query state
+        Evaluator eval = QueryParser.parse("div:has(* > a)");
+        Document other = Jsoup.parse("<div id=X><a></a></div>");
+        assertEquals(0, Selector.select(eval, other).size());
+        assertSelectedIds(Selector.select(eval, doc), "A", "C");
+    }
+
+    @Test public void testHasRelativeNestedScopes() {
+        // strict scoping applies layer by layer; an inner chain can never match through the outer scope, and a nested
+        // :has anchors to its own candidate while sibling conditions stay inside that candidate's relations
+        assertSelectedIds(Jsoup.parse("<article id=A><div></div><p></p></article><p></p>")
+            .select("article:has(div:has(+ p))"), "A");
+        assertEquals(0, Jsoup.parse("<article id=A><div></div></article><p></p>")
+            .select("article:has(div:has(+ p))").size());
+
+        // every leftmost step of a strict child chain must be a strict descendant of the scope
+        Document doc = Jsoup.parse(
+            "<div id=C><div id=D><span><a></a></span></div></div>" +
+            "<div id=A><p><a></a></p></div>");
+        assertSelectedIds(doc.select("div:has(div > * > a)"), "C");
+        assertSelectedIds(doc.select("div:has(* > * > a)"), "C");
+    }
+
     @Test public void testScope() {
         Document doc = Jsoup.parse("<div id=d><p id=p><span></span></p></div>");
         Element div = doc.selectFirst("div");
