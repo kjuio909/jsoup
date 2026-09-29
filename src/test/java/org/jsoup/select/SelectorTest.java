@@ -13,6 +13,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
+import java.util.Arrays;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -962,6 +963,76 @@ public class SelectorTest {
             "<div id=A><p><a></a></p></div>");
         assertSelectedIds(doc.select("div:has(div > * > a)"), "C");
         assertSelectedIds(doc.select("div:has(* > * > a)"), "C");
+    }
+
+    @Test public void testHasCombinedAttributeScopeAndSibling() {
+        // the headline case: an attribute value, :scope, and sibling combinators all in one relative expression
+        Document doc = Jsoup.parse(
+            "<div id=A data-k=1></div>" +
+            "<div id=B data-k=2></div>" +
+            "<div id=C data-k=1><span></span></div>");
+
+        // :scope anchors the sibling axis to each candidate; the attribute filters both ends
+        assertSelectedIds(doc.select("div[data-k=1]:has(:scope + div[data-k=2])"), "A");
+        assertSelectedIds(doc.select("div[data-k=2]:has(:scope + div[data-k=1])"), "B");
+        assertSelectedIds(doc.select("#A:has(:scope ~ div[data-k=1])"), "A");
+        // C has no following sibling, so its own attribute cannot satisfy the relative condition
+        assertEquals(0, doc.select("#C:has(:scope + div)").size());
+
+        // the same combination works when the target is reached inside the following sibling's subtree
+        Document nested = Jsoup.parse(
+            "<div id=A data-k=1></div>" +
+            "<div id=B data-k=2><p id=P data-v=ok></p></div>");
+        assertSelectedIds(nested.select("div[data-k=1]:has(:scope + div[data-k=2] p[data-v=ok])"), "A");
+        assertEquals(0, nested.select("div[data-k=1]:has(:scope + div[data-k=2] p[data-v=no])").size());
+
+        // quoted values decode entities against the parsed DOM, escaped classes still match, and negation composes
+        Document mixed = Jsoup.parse(
+            "<div id=X class=\"a.b\"><a id=L title=\"x &amp; y\"></a></div>" +
+            "<div id=Y class=\"a b\"></div>");
+        assertSelectedIds(mixed.select(".a\\.b:has(a[title='x & y'])"), "X");
+        assertSelectedIds(mixed.select("div:not(:has(a))"), "Y");
+    }
+
+    @Test public void testHasResultsAreReusableAndRoundTrip() {
+        // one selection expression filters the elements, and the result set keeps supporting ordinary selection,
+        // traversal, editing, and serialization
+        Document doc = Jsoup.parse(
+            "<div id=A><p>One</p></div>" +
+            "<div id=B><p>Two</p></div>");
+        Elements found = doc.select("div:has(p)");
+        assertSelectedIds(found, "A", "B");
+        assertEquals(Arrays.asList("One", "Two"), found.eachText());
+
+        // ordinary selectors and traversal keep working relative to the matched elements
+        assertEquals(2, found.select("p").size());
+        found.first().attr("data-mark", "1");
+        found.select("p").addClass("hi");
+
+        // serialize, re-parse, and run the same relation query: node set, text, and hierarchy stay equivalent
+        Document reparsed = Jsoup.parse(doc.html());
+        assertSelectedIds(reparsed.select("div:has(p.hi)"), "A", "B");
+        assertEquals(Arrays.asList("One", "Two"),
+            reparsed.select("div:has(p.hi)").eachText());
+        assertEquals("1", reparsed.expectFirst("#A").attr("data-mark"));
+
+        // no match and an empty document are ordinary empty results that stay usable
+        assertNull(Jsoup.parse("<div></div>").selectFirst("div:has(p)"));
+        Elements empty = Jsoup.parse("").select("div:has(> p, + span)");
+        assertTrue(empty.isEmpty());
+        assertEquals(0, empty.select("p").size());
+    }
+
+    @Test public void testHasLegalBranchesEvaluatedIndependently() {
+        // a legal branch that simply has no match does not stop the other branches from being evaluated
+        Document doc = Jsoup.parse("<div id=A><span></span></div><div id=B></div>");
+        assertSelectedIds(doc.select("div:has(nope, span)"), "A");
+        assertSelectedIds(doc.select("div:has(span, nope)"), "A");
+        assertSelectedIds(Jsoup.parse("<div id=A></div><div id=B></div>")
+            .select("div:has(+ div, + section)"), "A");
+        // ... but a syntactically broken branch fails the whole query even when a sibling branch is valid
+        assertThrows(Selector.SelectorParseException.class, () -> doc.select("div:has(span, >)"));
+        assertThrows(Selector.SelectorParseException.class, () -> doc.select("div:has(span), div:has(>)"));
     }
 
     @Test public void testScope() {
