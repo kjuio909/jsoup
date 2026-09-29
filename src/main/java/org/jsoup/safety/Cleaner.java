@@ -169,8 +169,9 @@ public class Cleaner {
         private int numDiscarded = 0;
         private final Element root;
         private Element destination; // current element to append nodes to
-        // style elements whose stylesheet data nodes were all rejected are removed at their tail; an element with at
-        // least one surviving data node is kept, mirroring an attribute whose value still has safe declarations
+        // every allowed style element starts out rejected and is kept only when at least one data node survives the
+        // stylesheet clean; an empty element, or one whose rules are all invalid, is removed at its tail, so no empty
+        // placeholder style element can remain
         private final Set<Element> rejectedStyleElements = new HashSet<>();
         private final Set<Element> keptStyleElements = new HashSet<>();
 
@@ -189,6 +190,8 @@ public class Cleaner {
                     destination.appendChild(destChild);
 
                     numDiscarded += meta.numAttribsDiscarded;
+                    if (sourceEl.normalName().equals("style")) // removed at its tail unless content survives
+                        rejectedStyleElements.add(destChild);
                     destination = destChild;
                 } else if (source != root) { // not a safe tag, so don't add. don't count root against discarded.
                     numDiscarded++;
@@ -203,8 +206,7 @@ public class Cleaner {
                 Node parent = source.parent();
                 if (parent.normalName().equals("style")) { // an allowed <style> element: clean its stylesheet text
                     String cleaned = safelist.cleanStyleSheet(parent.normalName(), (Element) parent, data);
-                    if (cleaned == null) { // this data node's rules were all invalid
-                        numDiscarded++;
+                    if (cleaned == null) { // this data node's rules were all invalid; the element is removed at tail
                         rejectedStyleElements.add(destination);
                     } else {
                         if (!cleaned.equals(data)) numDiscarded++; // rules or declarations were dropped/normalized
@@ -225,7 +227,10 @@ public class Cleaner {
                 destination = destination.parent(); // would have descended, so pop destination stack
                 boolean rejected = rejectedStyleElements.remove(self);
                 boolean kept = keptStyleElements.remove(self);
-                if (rejected && !kept) self.remove(); // remove a <style> element whose content was wholly invalid
+                if (rejected && !kept) { // remove a <style> with no surviving stylesheet content (also an empty one)
+                    self.remove();
+                    numDiscarded++;
+                }
             }
         }
     }

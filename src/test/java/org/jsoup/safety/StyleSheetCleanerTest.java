@@ -63,8 +63,19 @@ public class StyleSheetCleanerTest {
         assertEquals("<p>x</p>", org.jsoup.TextUtil.stripNewlines(body("p{background:url(javascript:1)}")));
     }
 
-    @Test void keepsWhitespaceOnlyStylesheet() {
-        assertEquals("  \n ", sheet("  \n "));
+    @Test void removesEmptyOrWhitespaceOnlyStyleElement() {
+        // no complete rule or declaration survives, so the whole element (its text and attributes) is removed rather
+        // than left as an empty placeholder, and no orphan text moves to its parent
+        assertNull(sheet("  \n "));
+        assertNull(sheet(""));
+        assertNull(sheet("   "));
+        assertEquals("<p>x</p>", org.jsoup.TextUtil.stripNewlines(body("  \n ")));
+        assertEquals("<p>x</p>", org.jsoup.TextUtil.stripNewlines(body("")));
+        // whitespace leading a real rule is not itself content; the rule survives and keeps its source spelling
+        assertEquals("  p{color:red}", sheet("  p{color:red}"));
+        // removal is a rewrite, so validation and cleaning agree
+        assertFalse(Cleaner.isValid("<style>  \n </style>", sheetSafelist()));
+        assertFalse(Cleaner.isValid("<style></style>", sheetSafelist()));
     }
 
     @Test void policyDisallowingStyleStillRemovesWholeElement() {
