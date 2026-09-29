@@ -780,6 +780,98 @@ public class SelectorTest {
         assertSelectedIds(doc.select("article:has(+ ::comment, + p)"), "a");
     }
 
+    @Test public void testHasLeadingSiblingStepStaysElementAdjacent() {
+        // the leading + anchored to the :scope keeps element adjacency, even when a leaf is matched deeper in the
+        // next sibling's subtree; intervening text/comment nodes between the two elements must not block that step
+        Document doc = Jsoup.parse("<div id=a></div>text<!--between--><div><!--inside--></div>");
+        assertSelectedIds(doc.select("#a:has(+ div)"), "a");
+        assertSelectedIds(doc.select("#a:has(+ div ::comment)"), "a");
+        assertSelectedIds(doc.select("#a:has(+ div > ::comment)"), "a");
+
+        // ... a + directly targeting a leaf is element-adjacent: intervening leaf nodes (text/comment) are skipped,
+        // but a real element between the subject and that leaf blocks it
+        assertSelectedIds(doc.select("#a:has(+ ::comment)"), "a"); // only a text node precedes the comment
+        assertSelectedIds(doc.select("#a:has(~ ::comment)"), "a");
+        assertEquals(0, Jsoup.parse("<article id=a></article><p></p><!--c-->")
+            .select("article:has(+ ::comment)").size()); // the intervening <p> blocks adjacency
+
+        // and an internal + step reached after a leaf keeps the tight, node-by-node adjacency
+        Document chained = Jsoup.parse("<article id=a></article><!--c--><b></b>txt<i></i>");
+        assertSelectedIds(chained.select("article:has(+ ::comment + b)"), "a");
+        assertEquals(0, chained.select("article:has(+ ::comment + b + i)").size()); // the txt blocks this step
+        assertSelectedIds(chained.select("article:has(+ b + i)"), "a"); // a pure-element chain still ignores leaves
+
+        // a leaf inside a nested :has() does not tighten the outer leading sibling step
+        Document nested = Jsoup.parse("<div id=a></div>txt<div><!--inside--></div>");
+        assertSelectedIds(nested.select("#a:has(+ div:has(::comment))"), "a");
+        assertSelectedIds(nested.select("#a:has(+ div:has(> ::comment))"), "a");
+    }
+
+    @Test public void testHasSiblingAlternativesIndependent() {
+        // a matching sibling branch survives an unrelated branch, in either order; the candidate is returned once
+        Document doc = Jsoup.parse("<div id=a></div><div><span></span></div>");
+        assertSelectedIds(doc.select("#a:has(+ div, > missing)"), "a");
+        assertSelectedIds(doc.select("#a:has(> missing, + div)"), "a");
+
+        // a descendant branch cannot borrow the sibling branch's outside candidates
+        assertEquals(0, doc.select("#a:has(+ div.missing, span)").size());
+        assertEquals(0, doc.select("#a:has(span, + div.missing)").size());
+
+        // a sibling-anchored branch reaches into the sibling's subtree, not its own or previous siblings
+        assertEquals(0, Jsoup.parse("<div id=a></div><section></section><div><span></span></div>")
+            .select("#a:has(+ div span)").size());
+        assertSelectedIds(Jsoup.parse("<div id=a></div><section></section><div><span></span></div>")
+            .select("#a:has(~ div span)"), "a");
+    }
+
+    @Test public void testHasBranchesDedupInDocumentOrder() {
+        // multiple branches that hit the same candidate return it once; parent and child stays in document order
+        Document doc = Jsoup.parse("<div id=A><div id=B><p></p><span></span></div></div>");
+        assertSelectedIds(doc.select("div:has(p, span)"), "A", "B");
+        assertSelectedIds(doc.select("div:has(p, p)"), "A", "B");
+        assertSelectedIds(doc.select("div:has(p, zzz)"), "A", "B");
+        assertEquals(0, doc.select("div:has(zzz, aaa)").size());
+    }
+
+    @Test public void testHasStatelessAcrossDocumentsAndRuns() {
+        String html = "<div id=a></div>txt<div><!--c--></div><div id=b><a></a></div><div id=c><p><span></span></p></div>";
+        String query = "div:has(+ div ::comment, > a, p span)";
+        Evaluator compiled = Selector.evaluatorOf(query);
+        java.util.stream.IntStream.range(0, 16).parallel().forEach(i -> {
+            Document doc = Jsoup.parse(html);
+            assertSelectedIds(doc.select(query), "a", "b", "c");
+            assertSelectedIds(doc.select(compiled), "a", "b", "c");
+            assertSelectedIds(Jsoup.parse("<div id=z></div>").select(compiled));
+            String serialized = doc.html();
+            for (int j = 0; j < 25; j++) doc.select(compiled);
+            assertEquals(serialized, doc.html()); // queries neither create nodes nor mutate the tree
+        });
+    }
+
+    @Test public void testHasRoundTripEquivalence() {
+        String html = "<div id=A><p>Hi &amp; bye</p><a title='He said &quot;hi&quot;'>l</a></div><ul><li>1<li>2</ul>";
+        String query = "div:has(p, a[title='He said \"hi\"'])";
+        Document doc = Jsoup.parse(html);
+        assertSelectedIds(doc.select(query), "A");
+        Document reparsed = Jsoup.parse(doc.html());
+        assertSelectedIds(reparsed.select(query), "A");
+        assertEquals(doc.html(), reparsed.html());
+        // no matches and an empty document are ordinary empty results
+        assertEquals(0, Jsoup.parse("<div id=A></div>").select("div:has(p)").size());
+        assertEquals(0, Jsoup.parse("").select("div:has(p)").size());
+    }
+
+    @Test public void testDocumentUsableAfterFailedHas() {
+        Document doc = Jsoup.parse("<div id=A><p id=p>x</p><b id=b></b></div>");
+        assertThrows(Selector.SelectorParseException.class, () -> doc.select("div:has(p, "));
+        assertThrows(Selector.SelectorParseException.class, () -> doc.select("div:has(+ ::comment +)"));
+        // the document still selects, traverses, and serializes exactly as before the failed parse
+        assertSelectedIds(doc.select("p"), "p");
+        assertSelectedIds(doc.select("[id]"), "A", "p", "b");
+        assertSelectedIds(doc.select("div:has(b, p)"), "A");
+        assertSelectedIds(doc.select("div:has(> p + b)"), "A");
+    }
+
     @Test public void testHasInvalidRelativeSelectors() {
         // empty condition, trailing combinator, and unbalanced parentheses remain parse errors
         assertThrows(Selector.SelectorParseException.class, () -> QueryParser.parse("a:has()"));

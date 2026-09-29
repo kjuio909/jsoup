@@ -236,43 +236,62 @@ abstract class StructuralEvaluator extends Evaluator {
             return false;
         }
 
-        /* Once a chain contains a leaf-node selector, every adjacent-sibling (+) step in that chain compares against the
-         complete sibling sequence -- text, comment, and data leaves count as intervening nodes instead of being
-         skipped. A nested :has() runs its own chain (prepared by its own constructor); :is() and :not() are chains of
-         their own and determine their mode from their own contents. */
+        /* Once a chain contains a leaf-node selector, an adjacent-sibling (+) step compares against the complete
+         sibling sequence when a leaf selector lies immediately on either side of that step: text, comment, and data
+         leaves then count as intervening nodes instead of being skipped. The leading + (or ~) step anchored directly to
+         the :scope element keeps ordinary element adjacency -- a leaf reached later in the chain (e.g. the comment in
+         "+ div ::comment") must not tighten that first step, and each nested layer narrows independently. A nested
+         :has() runs its own chain (prepared by its own constructor); :is() and :not() contents are chains of their own
+         and determine their mode from their own contents. */
         private static void forceNodeAdjacency(Evaluator eval) {
-            applyNodeAdjacency(eval, true);
+            applyNodeAdjacency(eval, true); // the first structural step of a branch is anchored to the :scope
         }
 
-        private static void applyNodeAdjacency(Evaluator eval, boolean chainHasLeaf) {
+        private static void applyNodeAdjacency(Evaluator eval, boolean leadingScope) {
             if (eval instanceof Has)
                 return; // a nested :has() runs its own chain
             if (eval instanceof Is || eval instanceof Not) {
-                // the container's contents are their own selector list / chain
-                Evaluator inner = ((StructuralEvaluator) eval).evaluator;
-                if (inner instanceof CombiningEvaluator.Or) {
-                    for (Evaluator branch : ((CombiningEvaluator.Or) inner).evaluators)
-                        applyNodeAdjacency(branch, chainContainsLeaf(branch));
-                } else {
-                    applyNodeAdjacency(inner, chainContainsLeaf(inner));
+                // the container's contents are their own selector list / chain, anchored afresh
+                applyNodeAdjacency(((StructuralEvaluator) eval).evaluator, false);
+                return;
+            }
+            if (eval instanceof CombiningEvaluator.And) {
+                ArrayList<Evaluator> members = ((CombiningEvaluator.And) eval).evaluators;
+                for (Evaluator member : members)
+                    applyNodeAdjacency(member, leadingScope);
+                for (int i = 0; i < members.size(); i++) {
+                    Evaluator member = members.get(i);
+                    if (!(member instanceof ImmediatePreviousSibling))
+                        continue;
+                    ImmediatePreviousSibling ips = (ImmediatePreviousSibling) member;
+                    boolean nodeAdjacent = chainContainsLeaf(ips.evaluator); // a leaf earlier in the chain
+                    if (!nodeAdjacent && !(leadingScope && isScopeAnchor(ips.evaluator))) {
+                        for (int j = 0; j < members.size(); j++) {
+                            if (j != i && chainContainsLeaf(members.get(j))) {
+                                nodeAdjacent = true; // a leaf in the right-hand compound
+                                break;
+                            }
+                        }
+                    }
+                    if (nodeAdjacent)
+                        ips.wantsNodes = true;
                 }
                 return;
             }
-            if (eval instanceof ImmediatePreviousSibling) {
-                StructuralEvaluator ips = (StructuralEvaluator) eval;
-                if (chainHasLeaf)
-                    ips.wantsNodes = true;
-                applyNodeAdjacency(ips.evaluator, chainHasLeaf);
+            if (eval instanceof CombiningEvaluator.Or) {
+                for (Evaluator branch : ((CombiningEvaluator.Or) eval).evaluators)
+                    applyNodeAdjacency(branch, false); // each alternative is its own chain
                 return;
             }
-            if (eval instanceof CombiningEvaluator) {
-                for (Evaluator inner : ((CombiningEvaluator) eval).evaluators)
-                    applyNodeAdjacency(inner, chainHasLeaf);
-            } else if (eval instanceof ImmediateParentRun) {
+            if (eval instanceof ImmediateParentRun) {
                 for (Evaluator inner : ((ImmediateParentRun) eval).evaluators)
-                    applyNodeAdjacency(inner, chainHasLeaf);
-            } else if (eval instanceof StructuralEvaluator) {
-                applyNodeAdjacency(((StructuralEvaluator) eval).evaluator, chainHasLeaf); // Ancestor, PreviousSibling
+                    applyNodeAdjacency(inner, leadingScope);
+                return;
+            }
+            if (eval instanceof StructuralEvaluator) {
+                // descend the left-hand structural chain (Ancestor, PreviousSibling, ImmediatePreviousSibling);
+                // only the outermost step carries the leading scope anchor
+                applyNodeAdjacency(((StructuralEvaluator) eval).evaluator, false);
             }
         }
 
