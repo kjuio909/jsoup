@@ -217,6 +217,30 @@ public class StyleSheetCleanerTest {
         assertNull(sheet("{{{}}}"));
     }
 
+    @Test void strayBraceDoesNotGlueStatements() {
+        // a stray top-level '}' is a parse error: the unfinished statement before it is dropped, never glued onto
+        // the next surviving statement (which would change its meaning and fail to re-clean)
+        assertEquals("p{color:red}", sheet("@media screen}p{color:red}"));
+        assertNull(sheet("@media screen}"));
+        assertNull(sheet("@}@")); // a bare '@' on either side of the stray brace is not an at-rule
+        assertEquals("@y", sheet("@x}@y")); // the well-formed at-keyword after the stray brace survives
+        // the later bounded rule still parses independently, and an empty prelude/rule leaves nothing behind
+        assertEquals("p{color:red}", sheet("@media screen}}p{color:red}"));
+        assertEquals("q{color:blue}", sheet("a{}q{color:blue}"));
+    }
+
+    @Test void separatorAfterTrailingBackslashStaysSeparated() {
+        // a surviving statement ending in an unescaped run of backslashes gets a space before the added ';', so the
+        // semicolon cannot be CSS-escaped and glue this statement to the next one on a re-clean
+        String once = sheet("p{color:red} x\\;@media screen { q{color:blue} }");
+        assertEquals(once, sheet(once));
+        // same guard for a rule whose lost closing brace had to be synthesized after a trailing backslash
+        String unclosed = sheet("p { color:red\\");
+        assertNotNull(unclosed);
+        assertEquals(unclosed, sheet(unclosed));
+        assertTrue(unclosed.endsWith("}}"));
+    }
+
     @Test void multipleStyleSheetsAreIndependent() {
         String html = "<style>p{color:red;background:url(javascript:1)}</style>"
             + "<style>b{color:blue}</style><p>x</p>";

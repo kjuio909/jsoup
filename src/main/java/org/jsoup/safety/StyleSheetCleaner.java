@@ -110,8 +110,11 @@ final class StyleSheetCleaner {
                 i = ruleStart;
                 continue;
             } else if (c == '}' && parenDepth == 0) {
-                // a stray '}' closes no block opened in this scope: validate the prelude before it as a statement
-                emitStatement(css, ruleStart, i, false, out);
+                // a stray '}' closes no block opened in this scope: this is a CSS parse error and the unfinished
+                // statement accumulated before it (whitespace and comments included, since a comment-only fragment
+                // would not survive a re-clean on its own) is discarded rather than glued onto the next surviving
+                // statement, which would change its meaning and fail to re-clean. The following rules, whose
+                // boundaries can still be determined, parse independently.
                 parenDepth = 0;
                 ruleStart = i + 1;
             }
@@ -151,8 +154,13 @@ final class StyleSheetCleaner {
         out.append(body);
         StringUtil.releaseBuilderVoid(body);
         // a block whose '}' was lost (e.g. swallowed by an unterminated comment) is closed here, exactly as a
-        // browser closes it at EOF, so the output never carries an orphan opening brace and stays idempotent
+        // browser closes it at EOF, so the output never carries an orphan opening brace and stays idempotent. When
+        // the body ends with an unescaped run of backslashes, one added '}' would itself be CSS-escaped and fail to
+        // close the block; add a second '}' the run cannot consume.
+        int slashes = 0;
+        for (int b = out.length() - 1; b >= 0 && out.charAt(b) == '\\'; b--) slashes++;
         out.append('}');
+        if (slashes % 2 == 1) out.append('}');
     }
 
     /**
@@ -217,7 +225,15 @@ final class StyleSheetCleaner {
         }
         if (safe) {
             out.append(css, start, keptEnd);
-            if (terminated) out.append(';');
+            if (terminated) {
+                // when the surviving text ends with an unescaped run of backslashes, an added ';' would itself be
+                // CSS-escaped and glue this statement to the next one on a re-clean; a single space consumes the
+                // escape so the separator stays a separator
+                int slashes = 0;
+                for (int b = out.length() - 1; b >= 0 && out.charAt(b) == '\\'; b--) slashes++;
+                if (slashes % 2 == 1) out.append(' ');
+                out.append(';');
+            }
         }
     }
 
