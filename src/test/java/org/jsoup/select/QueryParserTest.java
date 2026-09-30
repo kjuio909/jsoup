@@ -160,16 +160,42 @@ public class QueryParserTest {
         assertThrows(SelectorParseException.class, () -> QueryParser.parse(":nth-child(2 of )"));
         assertThrows(SelectorParseException.class, () -> QueryParser.parse(":nth-child(2 of)"));
         assertThrows(SelectorParseException.class, () -> QueryParser.parse(":nth-child()"));
+        assertThrows(SelectorParseException.class, () -> QueryParser.parse(":nth-child(   )"));
         // unbalanced parens
         assertThrows(SelectorParseException.class, () -> QueryParser.parse(":nth-child(2 of b"));
         assertThrows(SelectorParseException.class, () -> QueryParser.parse(":nth-child(2 of b, i"));
+        assertThrows(SelectorParseException.class, () -> QueryParser.parse(":nth-child(2 of b))"));
+        // the position expression is required and must be a valid An+B / odd / even
+        assertThrows(SelectorParseException.class, () -> QueryParser.parse(":nth-child(of b)"));
+        assertThrows(SelectorParseException.class, () -> QueryParser.parse(":nth-child(foo of b)"));
+        assertThrows(SelectorParseException.class, () -> QueryParser.parse(":nth-child(2x of b)"));
         // a broken selector list inside balanced parens
         assertThrows(SelectorParseException.class, () -> QueryParser.parse(":nth-child(2 of b,)"));
         assertThrows(SelectorParseException.class, () -> QueryParser.parse(":nth-child(2 of ,b)"));
+        assertThrows(SelectorParseException.class, () -> QueryParser.parse(":nth-child(2 of b,,i)"));
         assertThrows(SelectorParseException.class, () -> QueryParser.parse(":nth-child(2 of b >)"));
+        assertThrows(SelectorParseException.class, () -> QueryParser.parse(":nth-child(2 of b +)"));
+        assertThrows(SelectorParseException.class, () -> QueryParser.parse(":nth-child(2 of b ~)"));
+        assertThrows(SelectorParseException.class, () -> QueryParser.parse(":nth-child(2 of b :foo())"));
+        // "of" must be whitespace-bounded, so this is an unparseable position token rather than an of clause
+        assertThrows(SelectorParseException.class, () -> QueryParser.parse(":nth-child(2of b)"));
+        // one bad outer branch fails the whole selection
+        assertThrows(SelectorParseException.class, () -> QueryParser.parse("b, :nth-child(2 of )"));
         // of S is only valid for nth-child and nth-last-child
         assertThrows(SelectorParseException.class, () -> QueryParser.parse(":nth-of-type(2 of b)"));
         assertThrows(SelectorParseException.class, () -> QueryParser.parse(":nth-last-of-type(2 of b)"));
+    }
+
+    @Test
+    public void nthChildOfRobustTokenBoundaries() {
+        // tabs and newlines bound the of keyword just like spaces
+        assertEquals(":nth-child(1 of b)", QueryParser.parse(":nth-child(1\tof\tb)").toString());
+        assertEquals(":nth-child(1 of b)", QueryParser.parse(":nth-child(1\nof\nb)").toString());
+        // a comma nested inside :is() parens or a quoted value must not split S
+        Document doc = Jsoup.parse(
+            "<div id=s><b id=x data-z='x of y'></b><i id=y></i></div>");
+        assertEquals("x", doc.selectFirst("#s>:nth-child(1 of [data-z='x of y'])").id());
+        assertEquals("y", doc.selectFirst("#s>:nth-child(2 of b:is(#nope, #x), i)").id());
     }
 
     @Test

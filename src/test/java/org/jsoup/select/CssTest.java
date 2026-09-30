@@ -196,6 +196,103 @@ public class CssTest {
 		assertEquals("a2,b2", ids(doc, "div>:nth-child(2 of b)"));
 	}
 
+	@Test
+	public void nthChildOfSelectorDetails() {
+		// combinators and nested pseudos inside S, counted per parent against parsed DOM values
+		Document doc = Jsoup.parse(
+			"<body><div id=p1><b id=a1><span></span></b><i></i><b id=a2></b></div>" +
+			"<div id=p2><b id=b1></b><b id=b2><span></span></b></div></body>");
+
+		assertEquals("a1,b2", ids(doc, ":nth-child(1 of b:has(span))"));
+		assertEquals("a2", ids(doc, ":nth-child(1 of i + b)"));
+		assertEquals("a2", ids(doc, ":nth-child(1 of i ~ b)"));
+		assertEquals("a1,b1", ids(doc, "div>:nth-child(1 of div > b)"));
+	}
+
+	@Test
+	public void nthChildOfSelectorFiltersAndCounts() {
+		Document doc = Jsoup.parse(
+			"<div id=s><b id=x class='c1'>a</b><i id=y>b</i><b id=z class='c2'>c</b><em>d</em><b id=w>e</b></div>");
+
+		// a candidate must itself match S
+		assertEquals("y", ids(doc, "#s>:nth-child(1 of i)"));
+		assertTrue(doc.select("#s>:nth-child(2 of i)").isEmpty());
+		// class / attribute / :not / :is / nested nth in S
+		assertEquals("x", ids(doc, "#s>:nth-child(1 of b.c1)"));
+		assertEquals("w", ids(doc, "#s>:nth-child(2 of b:not(.c2))")); // matching b's: x(c1), w(no class)
+		assertEquals("z", ids(doc, "#s>:nth-child(2 of [class])")); // x and z carry a class
+		assertEquals("x", ids(doc, "#s>:nth-child(1 of b:is(.c1))"));
+		// b's at odd global child positions are x(1), z(3), w(5); filtered order x, z, w
+		assertEquals("z", ids(doc, "#s>:nth-child(2 of b:nth-child(odd))"));
+		// comma inside a nested :is() must not split the S list
+		assertEquals("y", ids(doc, "#s>:nth-child(2 of :is(b, i))"));
+		// duplicate S branches count each element only once
+		assertEquals("z", ids(doc, "#s>:nth-child(2 of b,b)"));
+		assertEquals("w", ids(doc, "#s>:nth-child(3 of b, b)"));
+		// nth-last counts from the end but results come back in document order
+		assertEquals("x,w", ids(doc, "#s>:nth-last-child(odd of b)")); // from end: w=1, z=2, x=3
+		// the universal selector as S is equivalent to no filter
+		assertEquals(ids(doc, "#s>:nth-child(2)"), ids(doc, "#s>:nth-child(2 of *)"));
+	}
+
+	@Test
+	public void nthChildOfSelectorDedupAndOrder() {
+		// overlapping outer branches hit elements at most once, in document order
+		Document doc = Jsoup.parse(
+			"<div id=s><b id=x>a</b><i id=y>b</i><b id=z>c</b><em>d</em><b id=w>e</b></div>");
+
+		assertEquals("x,z,w", ids(doc, "#s>:nth-child(1 of b), #s>b"));
+		assertEquals("x,z,w", ids(doc, "#s>b, #s>:nth-child(2 of b)"));
+		assertEquals("x,y", ids(doc, "#s>:nth-child(1 of b), #s>i"));
+	}
+
+	@Test
+	public void nthChildOfSelectorReuseAcrossDocuments() {
+		// a compiled evaluator holds no per-document state; positions are recomputed against each document's DOM
+		Evaluator eval = QueryParser.parse(":nth-child(1 of b)");
+		Document docA = Jsoup.parse("<div><b id=a1></b><b id=a2></b></div>");
+		Document docB = Jsoup.parse("<div><i></i><b id=b1></b><b id=b2></b></div>");
+
+		assertEquals("a1", String.join(",", docA.select(eval).eachAttr("id")));
+		assertEquals("b1", String.join(",", docB.select(eval).eachAttr("id")));
+		assertEquals("a1", String.join(",", docA.select(eval).eachAttr("id")));
+		assertEquals("b1", String.join(",", docB.select(eval).eachAttr("id")));
+	}
+
+	@Test
+	public void nthChildOfSelectorStableAcrossSerialize() {
+		// serializing and re-parsing, then running the same selector, yields the same elements, text, order, and dedup
+		String css = "#s>:nth-child(odd of b), #s>:nth-last-child(2 of b)";
+		Document doc = Jsoup.parse(
+			"<div id=s><b id=x>a</b><i id=y>b</b><b id=z>c</b><em>d</em><b id=w>e</b></div>");
+		Document reparsed = Jsoup.parse(doc.html());
+
+		assertEquals(signature(doc, css), signature(reparsed, css));
+	}
+
+	private static java.util.List<String> signature(Document doc, String css) {
+		java.util.ArrayList<String> out = new java.util.ArrayList<>();
+		for (org.jsoup.nodes.Element el : doc.select(css))
+			out.add(el.tagName() + "#" + el.id() + ":" + el.text() + ":" + el.parent().id());
+		return out;
+	}
+
+	@Test
+	public void nthChildOfSelectorEmptyAndNoMatch() {
+		Document empty = Jsoup.parse("");
+		assertTrue(empty.select(":nth-child(1 of b)").isEmpty());
+		assertNull(empty.selectFirst(":nth-child(1 of b)"));
+
+		Document doc = Jsoup.parse("<div id=s><b id=x></b><b id=z></b></div>");
+		assertTrue(doc.select(":nth-child(99 of b)").isEmpty());
+		assertTrue(doc.select("table>:nth-child(1 of tr)").isEmpty());
+		// queries never create or delete nodes
+		String html = doc.html();
+		doc.select(":nth-child(1 of b)");
+		doc.select(":nth-last-child(2 of b), b");
+		assertEquals(html, doc.html());
+	}
+
 	private static String ids(Document doc, String css) {
 		return String.join(",", doc.select(css).eachAttr("id"));
 	}
