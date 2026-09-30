@@ -196,6 +196,92 @@ public class CssTest {
 		assertEquals("a2,b2", ids(doc, "div>:nth-child(2 of b)"));
 	}
 
+	@Test
+	public void nthChildOfComplexSelector() {
+		// S may use types, classes, attributes, negation, combinators and nested pseudos; positions are computed
+		// against the parsed DOM
+		Document doc = Jsoup.parse(
+			"<div id=s>" +
+			"<b id=a class=x title=q>a</b>" +
+			"<i id=b>b</i>" +
+			"<b id=c>c</b>" +
+			"<b id=d class=x title=r>d</b>" +
+			"<i id=e class=z>e</i>" +
+			"<b id=f>f</b>" +
+			"</div>");
+
+		assertEquals("a", doc.selectFirst("#s>:nth-child(odd of b.x)").id()); // class filter, 1st of 2
+		assertEquals("d", doc.selectFirst("#s>:nth-child(2 of b[title])").id()); // attribute presence
+		assertEquals("b", doc.selectFirst("#s>:nth-child(2 of b, i)").id()); // selector list counted in doc order
+		assertEquals("c", doc.selectFirst("#s>:nth-child(1 of b:not(.x))").id()); // negation
+		assertEquals("f", doc.selectFirst("#s>:nth-child(1 of div b:last-of-type)").id()); // combinator + nested
+		// duplicate S branches count an element only once
+		assertEquals("a", doc.selectFirst("#s>:nth-child(1 of b, b, b)").id());
+		// a candidate is returned only when it itself matches S
+		assertTrue(doc.select("#s>:nth-child(1 of i)").stream().noneMatch(el -> el.normalName().equals("b")));
+	}
+
+	@Test
+	public void nthChildOfCommasAreLayered() {
+		// commas nested inside S (quoted attribute values, functional pseudos, :is()) must not terminate S;
+		// only the outer comma splits the query
+		Document doc = Jsoup.parse(
+			"<div id=s><b id=x title='p,q'>1</b><i id=y>2</i><b id=z title='p,q'>3</b></div>");
+
+		assertEquals("z", doc.selectFirst("#s>:nth-child(2 of b[title='p,q'])").id());
+		assertEquals("z", doc.selectFirst("#s>:nth-child(2 of b:is([title], .x))").id());
+		// S's two top-level branches are b:is(.a,.b) and i; the comma inside :is() is not an S separator
+		Document isDoc = Jsoup.parse(
+			"<div id=s><b id=x class=a>1</b><i id=y>2</i><b id=z class=b>3</b></div>");
+		assertEquals("z", isDoc.selectFirst("#s>:nth-child(3 of b:is(.a,.b), i)").id());
+		// an outer comma after the of clause starts a fresh outer branch
+		assertEquals("y,z", ids(doc, ":nth-child(2 of b), i"));
+	}
+
+	@Test
+	public void nthChildOfOuterBranchesDedupAndOrder() {
+		// multiple outer branches hitting the same element return it once, in document order
+		Document doc = Jsoup.parse("<div id=s><b id=x>1</b><i id=y>2</i><b id=z>3</b></div>");
+
+		assertEquals("x,y,z", ids(doc, "#s>:nth-child(odd of b), b, #s>*"));
+		assertEquals("x,y", ids(doc, "i, :nth-child(1 of b)"));
+	}
+
+	@Test
+	public void nthChildOfRoundTripAndIsolation() {
+		// serialize + reparse, then run the same selector: equivalent elements, order and dedup
+		String css = ":nth-child(2 of b, i)";
+		Document doc = Jsoup.parse("<div><b>1</b><i>2</i><b>3</b><i>4</i><b>5</b></div>");
+		Document reparse = Jsoup.parse(doc.html());
+		assertEquals(doc.select(css).eachText(), reparse.select(css).eachText());
+		assertEquals("2", String.join(",", doc.select(css).eachText()));
+
+		// consecutive calls on different documents do not share parsing or counting state
+		Document d1 = Jsoup.parse("<div><b>1</b><b>2</b></div>");
+		Document d2 = Jsoup.parse("<div><b>a</b><b>b</b><b>c</b></div>");
+		assertEquals("2", String.join(",", d1.select(":nth-child(2 of b)").eachText()));
+		assertEquals("b", String.join(",", d2.select(":nth-child(2 of b)").eachText()));
+		assertEquals("2", String.join(",", d1.select(":nth-child(2 of b)").eachText()));
+
+		// a parsed evaluator reused across documents is likewise isolated
+		Evaluator eval = QueryParser.parse(":nth-child(2 of b)");
+		assertEquals("2", String.join(",", d1.select(eval).eachText()));
+		assertEquals("b", String.join(",", d2.select(eval).eachText()));
+		assertEquals("2", String.join(",", d1.select(eval).eachText()));
+
+		// empty documents and no-match queries give an empty result rather than throwing
+		assertTrue(Jsoup.parse("").select(":nth-child(1 of b)").isEmpty());
+		assertTrue(Jsoup.parse("<p>x</p>").select(":nth-child(1 of b)").isEmpty());
+	}
+
+	@Test
+	public void nthChildOfQueryDoesNotMutateDom() {
+		Document doc = Jsoup.parse("<div id=s><b>1</b><i>2</i><b>3</b></div>");
+		String before = doc.toString();
+		doc.select(":nth-child(2 of b, i):nth-last-child(-n+2 of b)");
+		assertEquals(before, doc.toString()); // parent-child and sibling order are unchanged
+	}
+
 	private static String ids(Document doc, String css) {
 		return String.join(",", doc.select(css).eachAttr("id"));
 	}

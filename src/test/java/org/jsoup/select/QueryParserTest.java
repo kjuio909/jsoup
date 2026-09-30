@@ -167,6 +167,15 @@ public class QueryParserTest {
         assertThrows(SelectorParseException.class, () -> QueryParser.parse(":nth-child(2 of b,)"));
         assertThrows(SelectorParseException.class, () -> QueryParser.parse(":nth-child(2 of ,b)"));
         assertThrows(SelectorParseException.class, () -> QueryParser.parse(":nth-child(2 of b >)"));
+        assertThrows(SelectorParseException.class, () -> QueryParser.parse(":nth-child(2 of b +)"));
+        assertThrows(SelectorParseException.class, () -> QueryParser.parse(":nth-child(2 of b ~)"));
+        // missing position expression, or an illegal one before the of keyword
+        assertThrows(SelectorParseException.class, () -> QueryParser.parse(":nth-child( of b)"));
+        assertThrows(SelectorParseException.class, () -> QueryParser.parse(":nth-child(of b)"));
+        assertThrows(SelectorParseException.class, () -> QueryParser.parse(":nth-child(b of b)"));
+        assertThrows(SelectorParseException.class, () -> QueryParser.parse(":nth-child(2 of b)x"));
+        // the failure is the existing selector exception type, and a parsed of-selector renders faithfully
+        assertThrows(SelectorParseException.class, () -> QueryParser.parse(":nth-last-child(2 of b +)"));
         // of S is only valid for nth-child and nth-last-child
         assertThrows(SelectorParseException.class, () -> QueryParser.parse(":nth-of-type(2 of b)"));
         assertThrows(SelectorParseException.class, () -> QueryParser.parse(":nth-last-of-type(2 of b)"));
